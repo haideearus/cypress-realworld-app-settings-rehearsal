@@ -150,7 +150,12 @@
         "runAttempt": 1,
         "appSlug": "haideearus-settings-rehearsal"
       },
-      "branch": "agent/factory-7"
+      "branch": "agent/factory-7",
+      "ci": {
+        "requestId": "fd76c56d-dbc1-4fb9-ae10-11652e289a07",
+        "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
+        "runId": null
+      }
     }
   },
   "grants": {
