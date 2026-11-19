@@ -12,9 +12,9 @@
       "origin": "factory",
       "reviews": 0,
       "retries": 0,
-      "head": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1",
-      "status": "coding",
-      "pr": null,
+      "head": "cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f",
+      "status": "awaiting_review",
+      "pr": 2,
       "approval": null,
       "criteriaHash": "4f46c9fa40bec59f60c0a977334675e7f97c29c7d6ae46650fa181e6b82abfeb",
       "automatic": {
@@ -33,7 +33,8 @@
         "runId": "44576675818",
         "runAttempt": 1,
         "workflowSha": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1"
-      }
+      },
+      "branch": "agent/factory-1"
     }
   },
   "grants": {
@@ -45,8 +46,9 @@
       "runId": "44577280851",
       "runAttempt": 1,
       "head": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1",
-      "status": "reserved",
-      "at": "2026-11-19T17:27:23.768Z"
+      "status": "finished",
+      "at": "2026-11-19T17:27:23.768Z",
+      "outcome": "awaiting_review"
     }
   },
   "active": {
@@ -66,6 +68,14 @@
       "actor": "github-actions[bot]",
       "wakeReceipt": "10385ea602f1f4582febd345f4e9aee0aa31e9b07b84e3170b246097911d5e8e",
       "sourceActor": "haideearus"
+    },
+    {
+      "at": "2026-11-19T17:33:15.736Z",
+      "event": "finished",
+      "ticket": 1,
+      "grant": "2fab141e-71fb-451a-838f-ab50133b8d39",
+      "status": "awaiting_review",
+      "head": "cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f"
     }
   ]
 }
