@@ -138,9 +138,9 @@
       "origin": "factory",
       "reviews": 0,
       "retries": 0,
-      "head": "3dedebad97c369472c1d37006fcddd6c77fd9e14",
-      "status": "coding",
-      "pr": null,
+      "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
+      "status": "awaiting_review",
+      "pr": 8,
       "approval": null,
       "criteriaHash": "509230ca9e528014bd112bcad37597e88f57ab6d65351d7f673dece63f63c7aa",
       "automatic": {
@@ -149,7 +149,8 @@
         "runId": "44608935002",
         "runAttempt": 1,
         "appSlug": "haideearus-settings-rehearsal"
-      }
+      },
+      "branch": "agent/factory-7"
     }
   },
   "grants": {
@@ -221,8 +222,9 @@
       "runId": "44608935002",
       "runAttempt": 1,
       "head": "3dedebad97c369472c1d37006fcddd6c77fd9e14",
-      "status": "reserved",
-      "at": "2026-11-19T20:28:09.945Z"
+      "status": "finished",
+      "at": "2026-11-19T20:28:09.945Z",
+      "outcome": "awaiting_review"
     }
   },
   "active": {
@@ -380,6 +382,14 @@
       "runId": "44608935002",
       "runAttempt": 1,
       "actor": "haideearus"
+    },
+    {
+      "at": "2026-11-19T20:34:05.542Z",
+      "event": "finished",
+      "ticket": 7,
+      "grant": "f060a3a4-74a5-453b-b7c8-21b81daed65c",
+      "status": "awaiting_review",
+      "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20"
     }
   ]
 }
