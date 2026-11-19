@@ -64,10 +64,10 @@
     "3": {
       "coding": 1,
       "origin": "factory",
-      "reviews": 0,
+      "reviews": 1,
       "retries": 0,
       "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
-      "status": "awaiting_review",
+      "status": "reviewing",
       "pr": 4,
       "approval": null,
       "criteriaHash": "ae36142337b8360608e6825a1c05fe1c04103aafc2d1ff23c9563b6d8d06f2c3",
@@ -123,6 +123,17 @@
       "status": "finished",
       "at": "2026-11-19T18:11:19.947Z",
       "outcome": "awaiting_review"
+    },
+    "fd40c1c0-3970-4a61-a0aa-a251b2958c69": {
+      "id": "fd40c1c0-3970-4a61-a0aa-a251b2958c69",
+      "ticket": 3,
+      "phase": "review",
+      "slot": "cycle1",
+      "runId": "44585061235",
+      "runAttempt": 1,
+      "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
+      "status": "reserved",
+      "at": "2026-11-19T18:29:55.431Z"
     }
   },
   "active": {
@@ -221,6 +232,18 @@
       "grant": "5d63a228-09d0-479d-a49c-885709abdac4",
       "status": "awaiting_review",
       "head": "483a69c2d26818a188f0cf7d10934cb36f31e892"
+    },
+    {
+      "at": "2026-11-19T18:29:55.431Z",
+      "event": "reserved",
+      "ticket": 3,
+      "grant": "fd40c1c0-3970-4a61-a0aa-a251b2958c69",
+      "phase": "review",
+      "runId": "44585061235",
+      "runAttempt": 1,
+      "actor": "github-actions[bot]",
+      "wakeReceipt": "6ad51e26869ab9cf664fba4fefaba77ddf98b21d86641d3f81c1e61e33fb5129",
+      "sourceActor": "haideearus"
     }
   ]
 }
