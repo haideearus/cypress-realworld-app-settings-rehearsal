@@ -67,9 +67,17 @@
       "reviews": 1,
       "retries": 0,
       "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
-      "status": "reviewing",
+      "status": "reviewed",
       "pr": 4,
-      "approval": null,
+      "approval": {
+        "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
+        "pr": 4,
+        "grant": "fd40c1c0-3970-4a61-a0aa-a251b2958c69",
+        "verdict": "pass",
+        "source": "claude-subscription",
+        "fixture": false,
+        "evidence": "https://github.com/haideearus/cypress-realworld-app-settings-rehearsal/actions/runs/44585061235"
+      },
       "criteriaHash": "ae36142337b8360608e6825a1c05fe1c04103aafc2d1ff23c9563b6d8d06f2c3",
       "automatic": {
         "workflowRef": "haideearus/cypress-realworld-app-settings-rehearsal/.github/workflows/factory-automatic.yml@refs/heads/main",
@@ -84,7 +92,8 @@
         "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
         "runId": 44586393938,
         "passed": true
-      }
+      },
+      "feedback": "{\"head\":\"483a69c2d26818a188f0cf7d10934cb36f31e892\",\"verdict\":\"pass\",\"summary\":\"Reviewed src/components/BankAccountItem.tsx and the new src/components/__tests__/BankAccountItem.test.tsx at commit 483a69c. The Delete Button in BankAccountItem.tsx:30 now has aria-label={`Delete ${bankAccount.bankName}`}, giving screen readers a distinct accessible name per account while the visible text content \\\"Delete\\\" (line 35) and the onClick/deleteBankAccount behavior and data-test=\\\"bankaccount-delete\\\" selector are unchanged, matching the ticket's requirement to add the bank name to the accessible name without altering visible label or behavior. The new regression test renders the component with a fixed BankAccount fixture (matching the BankAccount interface in src/models/bankaccount.ts) and asserts via @testing-library/react's getByRole(\\\"button\\\", { name: \\\"Delete The Best Bank\\\" }) that the accessible name includes the bank name, and separately checks the button's text content is still \\\"Delete\\\" — this satisfies \\\"add a regression test that checks the accessible name without deleting an account\\\" since deleteBankAccount is a vi.fn() mock that is never invoked. Confirmed vitest/@testing-library/jest-dom are already configured (vite.config.ts test.setupFiles, package.json test:unit scripts) and other files in src/components/__tests__/ follow the same pattern, so the new test should run under the existing yarn test:unit setup. Checked cypress/tests/ui/bankaccounts.spec.ts, which selects the delete control via data-test (getBySelLike(\\\"delete\\\")) rather than aria-label/text, so the new aria-label does not risk breaking existing Cypress e2e coverage of bank account deletion. I did not execute the test suite myself in this read-only session; I relied on static inspection of the diff, current source, and type definitions, and note the task's CI run (referenced in context) as external evidence I did not independently verify.\",\"findings\":[]}"
     }
   },
   "grants": {
@@ -132,15 +141,12 @@
       "runId": "44585061235",
       "runAttempt": 1,
       "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
-      "status": "reserved",
-      "at": "2026-11-19T18:29:55.431Z"
+      "status": "finished",
+      "at": "2026-11-19T18:29:55.431Z",
+      "outcome": "reviewed"
     }
   },
-  "active": {
-    "ticket": 3,
-    "runId": "44585061235",
-    "runAttempt": 1
-  },
+  "active": null,
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -244,6 +250,14 @@
       "actor": "github-actions[bot]",
       "wakeReceipt": "6ad51e26869ab9cf664fba4fefaba77ddf98b21d86641d3f81c1e61e33fb5129",
       "sourceActor": "haideearus"
+    },
+    {
+      "at": "2026-11-19T18:31:40.791Z",
+      "event": "finished",
+      "ticket": 3,
+      "grant": "fd40c1c0-3970-4a61-a0aa-a251b2958c69",
+      "status": "reviewed",
+      "head": "483a69c2d26818a188f0cf7d10934cb36f31e892"
     }
   ]
 }
