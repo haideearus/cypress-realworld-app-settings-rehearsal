@@ -27,6 +27,7 @@ const BankAccountListItem: React.FC<BankAccountListItemProps> = ({
               color="secondary"
               size="large"
               data-test="bankaccount-delete"
+              aria-label={`Delete ${bankAccount.bankName}`}
               onClick={() => {
                 deleteBankAccount({ id: bankAccount.id });
               }}
