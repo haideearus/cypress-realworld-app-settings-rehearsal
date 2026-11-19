@@ -1,9 +1,71 @@
 {
   "version": 1,
   "repository": "haideearus/cypress-realworld-app-settings-rehearsal",
-  "days": {},
-  "tickets": {},
-  "grants": {},
-  "active": null,
-  "audit": []
+  "days": {
+    "2026-11-19": [
+      1
+    ]
+  },
+  "tickets": {
+    "1": {
+      "coding": 1,
+      "origin": "factory",
+      "reviews": 0,
+      "retries": 0,
+      "head": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1",
+      "status": "coding",
+      "pr": null,
+      "approval": null,
+      "criteriaHash": "4f46c9fa40bec59f60c0a977334675e7f97c29c7d6ae46650fa181e6b82abfeb",
+      "automatic": {
+        "workflowRef": "haideearus/cypress-realworld-app-settings-rehearsal/.github/workflows/factory-automatic.yml@refs/heads/main",
+        "workflowSha": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1",
+        "runId": "44577280851",
+        "runAttempt": 1,
+        "appSlug": "haideearus-settings-rehearsal"
+      },
+      "monitor": {
+        "version": 2,
+        "probeMode": "functional-browser",
+        "incidentId": "5d606624-cd36-4e99-b23f-ba17d9da8d67",
+        "issue": 1,
+        "criteriaHash": "4f46c9fa40bec59f60c0a977334675e7f97c29c7d6ae46650fa181e6b82abfeb",
+        "runId": "44576675818",
+        "runAttempt": 1,
+        "workflowSha": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1"
+      }
+    }
+  },
+  "grants": {
+    "2fab141e-71fb-451a-838f-ab50133b8d39": {
+      "id": "2fab141e-71fb-451a-838f-ab50133b8d39",
+      "ticket": 1,
+      "phase": "code",
+      "slot": "cycle1",
+      "runId": "44577280851",
+      "runAttempt": 1,
+      "head": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1",
+      "status": "reserved",
+      "at": "2026-11-19T17:27:23.768Z"
+    }
+  },
+  "active": {
+    "ticket": 1,
+    "runId": "44577280851",
+    "runAttempt": 1
+  },
+  "audit": [
+    {
+      "at": "2026-11-19T17:27:23.768Z",
+      "event": "reserved",
+      "ticket": 1,
+      "grant": "2fab141e-71fb-451a-838f-ab50133b8d39",
+      "phase": "code",
+      "runId": "44577280851",
+      "runAttempt": 1,
+      "actor": "github-actions[bot]",
+      "wakeReceipt": "10385ea602f1f4582febd345f4e9aee0aa31e9b07b84e3170b246097911d5e8e",
+      "sourceActor": "haideearus"
+    }
+  ]
 }
