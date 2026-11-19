@@ -78,7 +78,12 @@
         "runAttempt": 1,
         "appSlug": "haideearus-settings-rehearsal"
       },
-      "branch": "agent/factory-3"
+      "branch": "agent/factory-3",
+      "ci": {
+        "requestId": "56d24788-4a06-4f04-a936-7a79e49ac8d4",
+        "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
+        "runId": null
+      }
     }
   },
   "grants": {
