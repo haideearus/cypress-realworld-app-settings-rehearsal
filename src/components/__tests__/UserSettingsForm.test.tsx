@@ -23,6 +23,9 @@ const userProfile: User = {
 const getPhoneNumberInput = () =>
   document.querySelector('[data-test="user-settings-phoneNumber-input"]') as HTMLInputElement;
 
+const getEmailInput = () =>
+  document.querySelector('[data-test="user-settings-email-input"]') as HTMLInputElement;
+
 const getFirstNameInput = () =>
   document.querySelector('[data-test="user-settings-firstName-input"]') as HTMLInputElement;
 
@@ -46,6 +49,12 @@ const setFirstName = (value: string) => {
 
 const setLastName = (value: string) => {
   const input = getLastNameInput();
+  fireEvent.change(input, { target: { value } });
+  fireEvent.blur(input);
+};
+
+const setEmail = (value: string) => {
+  const input = getEmailInput();
   fireEvent.change(input, { target: { value } });
   fireEvent.blur(input);
 };
@@ -158,4 +167,17 @@ describe("UserSettingsForm lastName validation", () => {
       expect(screen.queryByText("Enter a last name")).not.toBeInTheDocument();
     }
   );
+});
+
+describe("UserSettingsForm email validation", () => {
+  test("rejects an invalid email, shows 'Must contain a valid email address', and keeps Save disabled", async () => {
+    render(<UserSettingsForm userProfile={userProfile} updateUser={vi.fn()} />);
+
+    setEmail("invalid-email");
+
+    await waitFor(() => {
+      expect(screen.getByText("Must contain a valid email address")).toBeInTheDocument();
+    });
+    expect(getSubmitButton()).toBeDisabled();
+  });
 });
