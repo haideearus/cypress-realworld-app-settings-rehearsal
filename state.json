@@ -5,7 +5,8 @@
     "2026-11-19": [
       1,
       3,
-      5
+      5,
+      7
     ]
   },
   "tickets": {
@@ -131,6 +132,24 @@
         "passed": true
       },
       "feedback": "{\"head\":\"43a647ef0c6a3cc3048c54e77f33c79c80bf375d\",\"verdict\":\"pass\",\"summary\":\"Reviewed scripts/factory/merge.cjs (AutomaticMerger.checks/nativeCheck/merge), scripts/tests/factory-merge.test.cjs, and .github/workflows/factory-automatic.yml against ticket #5's criteria: port the bounded CI wait, preserve required checks/review gate/usage counters, add regression tests reproducing the timing failure, and keep both factories disabled. The checks() method now loops up to maxPolls (10s/poll, 30 polls by default = 5 min) only when waitForVerify is set (non-dry-run factory-origin merges), re-validating ticket/PR identity via current()/pr() on each refresh so a changed head or closed PR aborts immediately rather than looping; nativeCheck's new \\\"pending\\\" classification only applies to genuinely in-flight check/job/run states, never to failed/cancelled ones, preserving the original exact-commit and app-identity verification. Mergeability is rechecked after verify passes, with explicit handling of null/blocked vs. clean/behind/unstable states to avoid a false \\\"mergeable\\\" accept. The workflow timeout bump from 10 to 15 minutes matches the new 5-minute worst-case poll budget. I traced all three new tests (factory-merge.test.cjs:688, 709, 725) step by step against the implementation and confirmed the control flow (iteration count, when sleep is invoked, when errors are thrown) matches the assertions, reproducing the original race (immediate failure on a still-running \\\"verify\\\" check) and showing it now waits, times out safely, and aborts on head changes. Existing tests (usage counters, grants/days unchanged, single PUT) are untouched and still align with the new call signature since other checks() call sites keep the default waitForVerify:false. FACTORY_ENABLED/FACTORY_AUTOMATION_ENABLED/FACTORY_AUTOMERGE_ENABLED gating is untouched by the diff, consistent with \\\"keep both factories disabled\\\" being an operational (repo-vars) concern outside this code change. Limits: this was a static review only (no tests executed); I relied on the supplied CI run URL as evidence of a prior pass without inspecting its logs, and I did not evaluate whether scoping the wait to t.origin === \\\"factory\\\" (excluding owner-pr/dependency-pr merges) is intentional versus a gap, since the ticket text doesn't say the fix must cover those origins.\",\"findings\":[]}"
+    },
+    "7": {
+      "coding": 1,
+      "origin": "factory",
+      "reviews": 0,
+      "retries": 0,
+      "head": "3dedebad97c369472c1d37006fcddd6c77fd9e14",
+      "status": "coding",
+      "pr": null,
+      "approval": null,
+      "criteriaHash": "509230ca9e528014bd112bcad37597e88f57ab6d65351d7f673dece63f63c7aa",
+      "automatic": {
+        "workflowRef": "haideearus/cypress-realworld-app-settings-rehearsal/.github/workflows/factory-automatic.yml@refs/heads/main",
+        "workflowSha": "3dedebad97c369472c1d37006fcddd6c77fd9e14",
+        "runId": "44608935002",
+        "runAttempt": 1,
+        "appSlug": "haideearus-settings-rehearsal"
+      }
     }
   },
   "grants": {
@@ -193,9 +212,24 @@
       "status": "finished",
       "at": "2026-11-19T19:49:33.763Z",
       "outcome": "reviewed"
+    },
+    "f060a3a4-74a5-453b-b7c8-21b81daed65c": {
+      "id": "f060a3a4-74a5-453b-b7c8-21b81daed65c",
+      "ticket": 7,
+      "phase": "code",
+      "slot": "cycle1",
+      "runId": "44608935002",
+      "runAttempt": 1,
+      "head": "3dedebad97c369472c1d37006fcddd6c77fd9e14",
+      "status": "reserved",
+      "at": "2026-11-19T20:28:09.945Z"
     }
   },
-  "active": null,
+  "active": {
+    "ticket": 7,
+    "runId": "44608935002",
+    "runAttempt": 1
+  },
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -336,6 +370,16 @@
       "grant": "e074644f-677a-4771-9f5f-1e05dfdcbcbb",
       "status": "reviewed",
       "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d"
+    },
+    {
+      "at": "2026-11-19T20:28:09.945Z",
+      "event": "reserved",
+      "ticket": 7,
+      "grant": "f060a3a4-74a5-453b-b7c8-21b81daed65c",
+      "phase": "code",
+      "runId": "44608935002",
+      "runAttempt": 1,
+      "actor": "haideearus"
     }
   ]
 }
