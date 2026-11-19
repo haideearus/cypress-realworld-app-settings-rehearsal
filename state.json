@@ -3,7 +3,8 @@
   "repository": "haideearus/cypress-realworld-app-settings-rehearsal",
   "days": {
     "2026-11-19": [
-      1
+      1,
+      3
     ]
   },
   "tickets": {
@@ -59,6 +60,24 @@
         "runAttempt": 1,
         "mergeCommit": "4d6139633a7e5a57bbd40f16aaf12be26878240d"
       }
+    },
+    "3": {
+      "coding": 1,
+      "origin": "factory",
+      "reviews": 0,
+      "retries": 0,
+      "head": "4d6139633a7e5a57bbd40f16aaf12be26878240d",
+      "status": "coding",
+      "pr": null,
+      "approval": null,
+      "criteriaHash": "ae36142337b8360608e6825a1c05fe1c04103aafc2d1ff23c9563b6d8d06f2c3",
+      "automatic": {
+        "workflowRef": "haideearus/cypress-realworld-app-settings-rehearsal/.github/workflows/factory-automatic.yml@refs/heads/main",
+        "workflowSha": "4d6139633a7e5a57bbd40f16aaf12be26878240d",
+        "runId": "44585061235",
+        "runAttempt": 1,
+        "appSlug": "haideearus-settings-rehearsal"
+      }
     }
   },
   "grants": {
@@ -85,9 +104,24 @@
       "status": "finished",
       "at": "2026-11-19T17:46:35.297Z",
       "outcome": "reviewed"
+    },
+    "5d63a228-09d0-479d-a49c-885709abdac4": {
+      "id": "5d63a228-09d0-479d-a49c-885709abdac4",
+      "ticket": 3,
+      "phase": "code",
+      "slot": "cycle1",
+      "runId": "44585061235",
+      "runAttempt": 1,
+      "head": "4d6139633a7e5a57bbd40f16aaf12be26878240d",
+      "status": "reserved",
+      "at": "2026-11-19T18:11:19.947Z"
     }
   },
-  "active": null,
+  "active": {
+    "ticket": 3,
+    "runId": "44585061235",
+    "runAttempt": 1
+  },
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -159,6 +193,18 @@
         "reviews": 1,
         "retries": 0
       }
+    },
+    {
+      "at": "2026-11-19T18:11:19.947Z",
+      "event": "reserved",
+      "ticket": 3,
+      "grant": "5d63a228-09d0-479d-a49c-885709abdac4",
+      "phase": "code",
+      "runId": "44585061235",
+      "runAttempt": 1,
+      "actor": "github-actions[bot]",
+      "wakeReceipt": "6ad51e26869ab9cf664fba4fefaba77ddf98b21d86641d3f81c1e61e33fb5129",
+      "sourceActor": "haideearus"
     }
   ]
 }
