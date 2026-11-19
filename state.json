@@ -165,7 +165,15 @@
         "runId": 44610045748,
         "passed": true
       },
-      "feedback": "{\"head\":\"ffb1ee34c2306050377220a7a68e1be6ae308a20\",\"verdict\":\"pass\",\"summary\":\"Reviewed src/components/NavBar.tsx and the new src/components/__tests__/NavBar.test.tsx against ticket #7. The fix adds aria-label=\\\"Notifications\\\" to the IconButton wrapping the notifications Badge/icon (NavBar.tsx:178). Per ARIA accname computation, an explicit aria-label always takes precedence over subtree text content, so the link's accessible name stays \\\"Notifications\\\" whether or not the Badge renders a numeric count - satisfying the \\\"regardless of badge count\\\" requirement. Navigation (component={RouterLink}, to=\\\"/notifications\\\") and badge rendering (badgeContent logic) are untouched, so existing behavior is preserved. The new test file renders NavBar inside MemoryRouter with a real notificationsMachine/useMachine instance (context override with results), checks the accessible name with no results (would fail pre-fix since the only accessible name source was the \\\"1\\\"/icon content) and again with one result, also asserting the href and the visible badge text \\\"1\\\" still render - this gives a genuine fails-before/passes-after regression test as requested. Confirmed context.results shape matches dataMachine's DataContext and that useMachine(machine, { context }) is a supported xstate v4/@xstate/react 3.2.2 pattern. Change is scoped solely to NavBar.tsx and its test, no production/config/CI files touched. I did not execute the test suite myself; I relied on static inspection of the component, machine, and test code plus the linked CI workflow as evidence it was exercised.\",\"findings\":[]}"
+      "feedback": "{\"head\":\"ffb1ee34c2306050377220a7a68e1be6ae308a20\",\"verdict\":\"pass\",\"summary\":\"Reviewed src/components/NavBar.tsx and the new src/components/__tests__/NavBar.test.tsx against ticket #7. The fix adds aria-label=\\\"Notifications\\\" to the IconButton wrapping the notifications Badge/icon (NavBar.tsx:178). Per ARIA accname computation, an explicit aria-label always takes precedence over subtree text content, so the link's accessible name stays \\\"Notifications\\\" whether or not the Badge renders a numeric count - satisfying the \\\"regardless of badge count\\\" requirement. Navigation (component={RouterLink}, to=\\\"/notifications\\\") and badge rendering (badgeContent logic) are untouched, so existing behavior is preserved. The new test file renders NavBar inside MemoryRouter with a real notificationsMachine/useMachine instance (context override with results), checks the accessible name with no results (would fail pre-fix since the only accessible name source was the \\\"1\\\"/icon content) and again with one result, also asserting the href and the visible badge text \\\"1\\\" still render - this gives a genuine fails-before/passes-after regression test as requested. Confirmed context.results shape matches dataMachine's DataContext and that useMachine(machine, { context }) is a supported xstate v4/@xstate/react 3.2.2 pattern. Change is scoped solely to NavBar.tsx and its test, no production/config/CI files touched. I did not execute the test suite myself; I relied on static inspection of the component, machine, and test code plus the linked CI workflow as evidence it was exercised.\",\"findings\":[]}",
+      "merge": {
+        "status": "intent",
+        "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
+        "pr": 8,
+        "at": "2026-11-19T20:48:50.733Z",
+        "runId": "44608935002",
+        "runAttempt": 1
+      }
     }
   },
   "grants": {
@@ -254,7 +262,11 @@
       "outcome": "reviewed"
     }
   },
-  "active": null,
+  "active": {
+    "ticket": 7,
+    "runId": "44608935002",
+    "runAttempt": 1
+  },
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
