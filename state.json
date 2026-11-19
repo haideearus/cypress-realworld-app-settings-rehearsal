@@ -95,12 +95,13 @@
       },
       "feedback": "{\"head\":\"483a69c2d26818a188f0cf7d10934cb36f31e892\",\"verdict\":\"pass\",\"summary\":\"Reviewed src/components/BankAccountItem.tsx and the new src/components/__tests__/BankAccountItem.test.tsx at commit 483a69c. The Delete Button in BankAccountItem.tsx:30 now has aria-label={`Delete ${bankAccount.bankName}`}, giving screen readers a distinct accessible name per account while the visible text content \\\"Delete\\\" (line 35) and the onClick/deleteBankAccount behavior and data-test=\\\"bankaccount-delete\\\" selector are unchanged, matching the ticket's requirement to add the bank name to the accessible name without altering visible label or behavior. The new regression test renders the component with a fixed BankAccount fixture (matching the BankAccount interface in src/models/bankaccount.ts) and asserts via @testing-library/react's getByRole(\\\"button\\\", { name: \\\"Delete The Best Bank\\\" }) that the accessible name includes the bank name, and separately checks the button's text content is still \\\"Delete\\\" — this satisfies \\\"add a regression test that checks the accessible name without deleting an account\\\" since deleteBankAccount is a vi.fn() mock that is never invoked. Confirmed vitest/@testing-library/jest-dom are already configured (vite.config.ts test.setupFiles, package.json test:unit scripts) and other files in src/components/__tests__/ follow the same pattern, so the new test should run under the existing yarn test:unit setup. Checked cypress/tests/ui/bankaccounts.spec.ts, which selects the delete control via data-test (getBySelLike(\\\"delete\\\")) rather than aria-label/text, so the new aria-label does not risk breaking existing Cypress e2e coverage of bank account deletion. I did not execute the test suite myself in this read-only session; I relied on static inspection of the diff, current source, and type definitions, and note the task's CI run (referenced in context) as external evidence I did not independently verify.\",\"findings\":[]}",
       "merge": {
-        "status": "intent",
+        "status": "merged",
         "head": "483a69c2d26818a188f0cf7d10934cb36f31e892",
         "pr": 4,
-        "at": "2026-11-19T18:36:45.343Z",
+        "at": "2026-11-19T18:36:56.585Z",
         "runId": "44589459961",
-        "runAttempt": 1
+        "runAttempt": 1,
+        "mergeCommit": "5687ddb7271c30368c443a8d64ff41fe653f6d05"
       }
     }
   },
@@ -154,11 +155,7 @@
       "outcome": "reviewed"
     }
   },
-  "active": {
-    "ticket": 3,
-    "runId": "44589459961",
-    "runAttempt": 1
-  },
+  "active": null,
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
