@@ -139,9 +139,17 @@
       "reviews": 1,
       "retries": 0,
       "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
-      "status": "reviewing",
+      "status": "reviewed",
       "pr": 8,
-      "approval": null,
+      "approval": {
+        "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
+        "pr": 8,
+        "grant": "81f1fac8-ab40-430e-88de-17ffe5848683",
+        "verdict": "pass",
+        "source": "claude-subscription",
+        "fixture": false,
+        "evidence": "https://github.com/haideearus/cypress-realworld-app-settings-rehearsal/actions/runs/44608935002"
+      },
       "criteriaHash": "509230ca9e528014bd112bcad37597e88f57ab6d65351d7f673dece63f63c7aa",
       "automatic": {
         "workflowRef": "haideearus/cypress-realworld-app-settings-rehearsal/.github/workflows/factory-automatic.yml@refs/heads/main",
@@ -156,7 +164,8 @@
         "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
         "runId": 44610045748,
         "passed": true
-      }
+      },
+      "feedback": "{\"head\":\"ffb1ee34c2306050377220a7a68e1be6ae308a20\",\"verdict\":\"pass\",\"summary\":\"Reviewed src/components/NavBar.tsx and the new src/components/__tests__/NavBar.test.tsx against ticket #7. The fix adds aria-label=\\\"Notifications\\\" to the IconButton wrapping the notifications Badge/icon (NavBar.tsx:178). Per ARIA accname computation, an explicit aria-label always takes precedence over subtree text content, so the link's accessible name stays \\\"Notifications\\\" whether or not the Badge renders a numeric count - satisfying the \\\"regardless of badge count\\\" requirement. Navigation (component={RouterLink}, to=\\\"/notifications\\\") and badge rendering (badgeContent logic) are untouched, so existing behavior is preserved. The new test file renders NavBar inside MemoryRouter with a real notificationsMachine/useMachine instance (context override with results), checks the accessible name with no results (would fail pre-fix since the only accessible name source was the \\\"1\\\"/icon content) and again with one result, also asserting the href and the visible badge text \\\"1\\\" still render - this gives a genuine fails-before/passes-after regression test as requested. Confirmed context.results shape matches dataMachine's DataContext and that useMachine(machine, { context }) is a supported xstate v4/@xstate/react 3.2.2 pattern. Change is scoped solely to NavBar.tsx and its test, no production/config/CI files touched. I did not execute the test suite myself; I relied on static inspection of the component, machine, and test code plus the linked CI workflow as evidence it was exercised.\",\"findings\":[]}"
     }
   },
   "grants": {
@@ -240,15 +249,12 @@
       "runId": "44608935002",
       "runAttempt": 1,
       "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20",
-      "status": "reserved",
-      "at": "2026-11-19T20:46:24.335Z"
+      "status": "finished",
+      "at": "2026-11-19T20:46:24.335Z",
+      "outcome": "reviewed"
     }
   },
-  "active": {
-    "ticket": 7,
-    "runId": "44608935002",
-    "runAttempt": 1
-  },
+  "active": null,
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -417,6 +423,14 @@
       "runId": "44608935002",
       "runAttempt": 1,
       "actor": "haideearus"
+    },
+    {
+      "at": "2026-11-19T20:47:52.453Z",
+      "event": "finished",
+      "ticket": 7,
+      "grant": "81f1fac8-ab40-430e-88de-17ffe5848683",
+      "status": "reviewed",
+      "head": "ffb1ee34c2306050377220a7a68e1be6ae308a20"
     }
   ]
 }
