@@ -116,7 +116,11 @@
       "approval": null,
       "criteriaHash": "6430421aa2c0cba16d6f2a63a5eba3cecca6667f5ffdb76f3531fc56450bbfe7",
       "branch": "agent/sandbox-wait-for-required-ci",
-      "ci": null
+      "ci": {
+        "requestId": "f0074e1d-2d42-4654-b515-c0ad38450046",
+        "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d",
+        "runId": null
+      }
     }
   },
   "grants": {
