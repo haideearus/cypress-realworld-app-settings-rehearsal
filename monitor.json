@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "repository": "haideearus/cypress-realworld-app-settings-rehearsal",
+  "active": "5d606624-cd36-4e99-b23f-ba17d9da8d67",
+  "incidents": {
+    "5d606624-cd36-4e99-b23f-ba17d9da8d67": {
+      "id": "5d606624-cd36-4e99-b23f-ba17d9da8d67",
+      "at": "2026-11-19T17:26:20.354Z",
+      "day": "2026-11-19",
+      "phase": "pending",
+      "recovered": false,
+      "source": {
+        "runId": "44576675818",
+        "runAttempt": 1,
+        "workflowSha": "d51ff791f82e7f315c3f5b157b9b0b89e32a44b1"
+      },
+      "criteriaHash": "4f46c9fa40bec59f60c0a977334675e7f97c29c7d6ae46650fa181e6b82abfeb",
+      "issue": null,
+      "probeMode": "functional-browser",
+      "functionalCheck": "form-validation",
+      "functionalAssertion": "settings-email-invalid"
+    }
+  }
+}
