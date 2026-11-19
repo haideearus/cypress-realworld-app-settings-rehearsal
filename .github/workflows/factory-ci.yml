@@ -1,0 +1,113 @@
+name: Factory CI
+run-name: ${{ format('Factory CI / {0}', inputs.factory_request_id || github.event.pull_request.number || github.ref_name) }}
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      factory_request_id:
+        description: Correlation ID supplied by the trusted factory controller
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: factory_test
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: rwa_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U factory_test -d rwa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://factory_test:disposable-ci-password@127.0.0.1:5432/rwa_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Load the controller action and validate disabled configuration without AI or state writes
+        uses: ./.github/actions/factory-control
+        with:
+          operation: validate
+          variables_json: >-
+            {"FACTORY_ENABLED":"false","FACTORY_MAX_TICKETS_PER_DAY":"5",
+            "FACTORY_MAX_CODING_ATTEMPTS_PER_TICKET":"2","FACTORY_MAX_REVIEWS_PER_TICKET":"2",
+            "FACTORY_MAX_AUTOMATIC_RETRIES":"1","FACTORY_MAX_CONCURRENT_TICKETS":"1",
+            "FACTORY_TIMEZONE":"Europe/Bucharest","FACTORY_RUN_TIMEOUT_MINUTES":"15",
+            "FACTORY_MAX_TURNS_PER_RUN":"100","FACTORY_APP_URL":"https://settings-rehearsal.invalid"}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Install the checksum-pinned secret scanner
+        run: node scripts/factory/scanner-install.cjs
+      - name: Reject secrets in the complete tracked source snapshot
+        run: node scripts/factory/secret-scan.cjs source
+      - name: Prove the scanner blocks a seeded credential without leaking it
+        run: node --test scripts/tests/factory-secret-scan.test.cjs
+        env:
+          FACTORY_SECRET_SCAN_INTEGRATION: "true"
+      - run: corepack enable && corepack prepare yarn@1.22.22 --activate
+      - run: yarn install --frozen-lockfile
+      - run: yarn predev:cognito:ci
+      - name: Factory policy and simulated agent checks without model calls
+        run: |
+          (cd scripts/factory/dependency-tools && npm ci --ignore-scripts --no-audit --fund=false)
+          yarn test:factory
+      - name: Verify the pinned Claude action argument boundary without a model
+        run: node --test scripts/tests/factory-discovery-action.test.cjs
+        env:
+          FACTORY_DISCOVERY_ACTION_TEST: "true"
+      - name: Exercise the credential-free drill sandbox without AI or GitHub writes
+        run: node --test scripts/tests/factory-drill-sandbox.test.cjs
+        env:
+          FACTORY_DRILL_DOCKER_TEST: "true"
+      - name: Exercise discovery isolation with a credential-free fixture and no model
+        run: node --test scripts/tests/factory-discovery-docker.test.cjs
+        env:
+          FACTORY_DISCOVERY_DOCKER_TEST: "true"
+      - name: Smoke-test actual discovery image and browser login without AI
+        timeout-minutes: 20
+        run: node --test scripts/tests/factory-discovery-image.test.cjs
+        env:
+          FACTORY_DISCOVERY_IMAGE_TEST: "true"
+      - run: yarn types && yarn lint && yarn test:unit:ci
+      - run: yarn build:production && yarn test:production
+      - run: yarn test:production:browser
+      - run: yarn build:ci
+      - name: Start the disposable local app
+        run: yarn start:ci > /tmp/factory-app.log 2>&1 &
+      - name: API and browser regression tests without cloud recording
+        run: yarn cypress:run --browser electron --spec 'cypress/tests/api/*,cypress/tests/ui/*'
+      - name: Scan failure logs before artifact upload
+        id: failure_scan
+        if: failure()
+        run: |
+          if [ -f /tmp/factory-app.log ]; then
+            node scripts/factory/secret-scan.cjs file /tmp/factory-app.log
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ failure() && steps.failure_scan.outcome == 'success' }}
+        with:
+          name: test-failure-evidence
+          retention-days: 7
+          path: |
+            cypress/screenshots
+            /tmp/factory-app.log
