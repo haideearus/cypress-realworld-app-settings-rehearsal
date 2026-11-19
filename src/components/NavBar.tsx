@@ -175,6 +175,7 @@ const NavBar: React.FC<NavBarProps> = ({ drawerOpen, toggleDrawer, notifications
           component={RouterLink}
           to="/notifications"
           data-test="nav-top-notifications-link"
+          aria-label="Notifications"
           size="large"
         >
           <Badge
