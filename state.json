@@ -49,15 +49,7 @@
         "runId": 44578485540,
         "passed": true
       },
-      "feedback": "{\"verdict\":\"pass\",\"head\":\"cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f\",\"summary\":\"Diff touches only src/components/UserSettingsForm.tsx (line 37) and src/components/__tests__/UserSettingsForm.test.tsx. The yup email validator's error string was changed from \\\"Invalid email\\\" to \\\"Must contain a valid email address\\\". This aligns the app with the already-existing, untouched e2e expectation in cypress/tests/ui/user-settings.spec.ts:51 and the discovery harness assertion \\\"settings-email-invalid\\\" in scripts/tests/factory-functional-discovery.cy.js:113 and scripts/factory/functional-discovery-contract.cjs, both of which require exactly that string. This was the smallest possible fix for the reported mismatch (ticket #1), it does not touch the discovery workflow, contract, harness, or any other validation rule (firstName/lastName/phoneNumber messages untouched). A new regression test was added (UserSettingsForm.test.tsx: setEmail/getEmailInput helpers plus a new \\\"UserSettingsForm email validation\\\" describe block) that types an invalid email, blurs, and asserts both the exact new error text renders and the Save button stays disabled, directly covering the previously-failing assertion. CI evidence link in the ticket (run 44578485540) is taken as the regression result; I did not execute any commands in this read-only review. Limits: I could not run the full test suite or the Cypress discovery check myself, and did not re-verify every other locale/format edge case for the yup email validator (unchanged logic, only the message string changed), but no other validation or policy-relevant files were modified.\",\"findings\":[]}",
-      "merge": {
-        "status": "intent",
-        "head": "cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f",
-        "pr": 2,
-        "at": "2026-11-19T17:48:57.705Z",
-        "runId": "44577280851",
-        "runAttempt": 1
-      }
+      "feedback": "{\"verdict\":\"pass\",\"head\":\"cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f\",\"summary\":\"Diff touches only src/components/UserSettingsForm.tsx (line 37) and src/components/__tests__/UserSettingsForm.test.tsx. The yup email validator's error string was changed from \\\"Invalid email\\\" to \\\"Must contain a valid email address\\\". This aligns the app with the already-existing, untouched e2e expectation in cypress/tests/ui/user-settings.spec.ts:51 and the discovery harness assertion \\\"settings-email-invalid\\\" in scripts/tests/factory-functional-discovery.cy.js:113 and scripts/factory/functional-discovery-contract.cjs, both of which require exactly that string. This was the smallest possible fix for the reported mismatch (ticket #1), it does not touch the discovery workflow, contract, harness, or any other validation rule (firstName/lastName/phoneNumber messages untouched). A new regression test was added (UserSettingsForm.test.tsx: setEmail/getEmailInput helpers plus a new \\\"UserSettingsForm email validation\\\" describe block) that types an invalid email, blurs, and asserts both the exact new error text renders and the Save button stays disabled, directly covering the previously-failing assertion. CI evidence link in the ticket (run 44578485540) is taken as the regression result; I did not execute any commands in this read-only review. Limits: I could not run the full test suite or the Cypress discovery check myself, and did not re-verify every other locale/format edge case for the yup email validator (unchanged logic, only the message string changed), but no other validation or policy-relevant files were modified.\",\"findings\":[]}"
     }
   },
   "grants": {
@@ -86,11 +78,7 @@
       "outcome": "reviewed"
     }
   },
-  "active": {
-    "ticket": 1,
-    "runId": "44577280851",
-    "runAttempt": 1
-  },
+  "active": null,
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -131,6 +119,19 @@
       "grant": "4a6852ba-32c4-4136-b630-75ba15a619b1",
       "status": "reviewed",
       "head": "cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f"
+    },
+    {
+      "at": "2026-11-19T17:49:05.558Z",
+      "event": "automatic_merge_not_sent",
+      "ticket": 1,
+      "previousMergeIntent": {
+        "status": "intent",
+        "head": "cfaeb809aaa09a9d3a44db3c51133abf1e3eb12f",
+        "pr": 2,
+        "at": "2026-11-19T17:48:57.705Z",
+        "runId": "44577280851",
+        "runAttempt": 1
+      }
     }
   ]
 }
