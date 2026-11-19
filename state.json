@@ -111,9 +111,17 @@
       "reviews": 1,
       "retries": 0,
       "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d",
-      "status": "reviewing",
+      "status": "reviewed",
       "pr": 6,
-      "approval": null,
+      "approval": {
+        "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d",
+        "pr": 6,
+        "grant": "e074644f-677a-4771-9f5f-1e05dfdcbcbb",
+        "verdict": "pass",
+        "source": "claude-subscription",
+        "fixture": false,
+        "evidence": "https://github.com/haideearus/cypress-realworld-app-settings-rehearsal/actions/runs/44602277576"
+      },
       "criteriaHash": "6430421aa2c0cba16d6f2a63a5eba3cecca6667f5ffdb76f3531fc56450bbfe7",
       "branch": "agent/sandbox-wait-for-required-ci",
       "ci": {
@@ -121,7 +129,8 @@
         "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d",
         "runId": 44602372555,
         "passed": true
-      }
+      },
+      "feedback": "{\"head\":\"43a647ef0c6a3cc3048c54e77f33c79c80bf375d\",\"verdict\":\"pass\",\"summary\":\"Reviewed scripts/factory/merge.cjs (AutomaticMerger.checks/nativeCheck/merge), scripts/tests/factory-merge.test.cjs, and .github/workflows/factory-automatic.yml against ticket #5's criteria: port the bounded CI wait, preserve required checks/review gate/usage counters, add regression tests reproducing the timing failure, and keep both factories disabled. The checks() method now loops up to maxPolls (10s/poll, 30 polls by default = 5 min) only when waitForVerify is set (non-dry-run factory-origin merges), re-validating ticket/PR identity via current()/pr() on each refresh so a changed head or closed PR aborts immediately rather than looping; nativeCheck's new \\\"pending\\\" classification only applies to genuinely in-flight check/job/run states, never to failed/cancelled ones, preserving the original exact-commit and app-identity verification. Mergeability is rechecked after verify passes, with explicit handling of null/blocked vs. clean/behind/unstable states to avoid a false \\\"mergeable\\\" accept. The workflow timeout bump from 10 to 15 minutes matches the new 5-minute worst-case poll budget. I traced all three new tests (factory-merge.test.cjs:688, 709, 725) step by step against the implementation and confirmed the control flow (iteration count, when sleep is invoked, when errors are thrown) matches the assertions, reproducing the original race (immediate failure on a still-running \\\"verify\\\" check) and showing it now waits, times out safely, and aborts on head changes. Existing tests (usage counters, grants/days unchanged, single PUT) are untouched and still align with the new call signature since other checks() call sites keep the default waitForVerify:false. FACTORY_ENABLED/FACTORY_AUTOMATION_ENABLED/FACTORY_AUTOMERGE_ENABLED gating is untouched by the diff, consistent with \\\"keep both factories disabled\\\" being an operational (repo-vars) concern outside this code change. Limits: this was a static review only (no tests executed); I relied on the supplied CI run URL as evidence of a prior pass without inspecting its logs, and I did not evaluate whether scoping the wait to t.origin === \\\"factory\\\" (excluding owner-pr/dependency-pr merges) is intentional versus a gap, since the ticket text doesn't say the fix must cover those origins.\",\"findings\":[]}"
     }
   },
   "grants": {
@@ -181,15 +190,12 @@
       "runId": "44602277576",
       "runAttempt": 1,
       "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d",
-      "status": "reserved",
-      "at": "2026-11-19T19:49:33.763Z"
+      "status": "finished",
+      "at": "2026-11-19T19:49:33.763Z",
+      "outcome": "reviewed"
     }
   },
-  "active": {
-    "ticket": 5,
-    "runId": "44602277576",
-    "runAttempt": 1
-  },
+  "active": null,
   "audit": [
     {
       "at": "2026-11-19T17:27:23.768Z",
@@ -322,6 +328,14 @@
       "runId": "44602277576",
       "runAttempt": 1,
       "actor": "haideearus"
+    },
+    {
+      "at": "2026-11-19T20:08:27.260Z",
+      "event": "finished",
+      "ticket": 5,
+      "grant": "e074644f-677a-4771-9f5f-1e05dfdcbcbb",
+      "status": "reviewed",
+      "head": "43a647ef0c6a3cc3048c54e77f33c79c80bf375d"
     }
   ]
 }
