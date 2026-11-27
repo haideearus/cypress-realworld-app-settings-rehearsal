@@ -19,10 +19,8 @@ async function producer(api, context, { complete = true } = {}) {
     run.head_sha !== context.workflowSha ||
     run.repository?.full_name !== c.REPOSITORY ||
     run.head_repository?.full_name !== c.REPOSITORY ||
-    run.actor?.login !== "haideearus" ||
-    run.actor.id !== 101267861 ||
-    run.triggering_actor?.login !== "haideearus" ||
-    run.triggering_actor.id !== 101267861 ||
+    run.actor?.login !== context.actor ||
+    !c.runActorOK(run) ||
     run.event !== context.event ||
     (complete ? run.status !== "completed" : run.status !== "in_progress")
   )
@@ -61,9 +59,19 @@ async function verifySource(
         store,
       })
     );
-  const proof = f.sourceProof(candidate.source);
+  return Boolean(
+    await verifySweepSource(api, candidate.source, candidate.artifact, { ledger, discovery })
+  );
+}
+async function verifySweepSource(
+  api,
+  sourceProof,
+  artifactProof,
+  { ledger = new Ledger(api), discovery = new DiscoveryStore(api) } = {}
+) {
+  const proof = f.sourceProof(sourceProof);
   const { state } = await ledger.read();
-  const grant = state.grants[candidate.source.grantId];
+  const grant = state.grants[sourceProof.grantId];
   const ticket = grant && state.tickets[String(grant.ticket)];
   if (
     !grant ||
@@ -108,9 +116,7 @@ async function verifySource(
     run.head_branch !== "main" ||
     run.repository?.full_name !== c.REPOSITORY ||
     run.head_repository?.full_name !== c.REPOSITORY ||
-    run.actor?.login !== "haideearus" ||
-    run.actor.id !== 101267861 ||
-    run.triggering_actor?.login !== "haideearus" ||
+    !c.runActorOK(run) ||
     !["schedule", "workflow_run", "workflow_dispatch"].includes(run.event) ||
     run.status !== "completed" ||
     run.conclusion !== "success"
@@ -140,21 +146,23 @@ async function verifySource(
     ci.head_branch !== "main" ||
     ci.status !== "completed" ||
     ci.conclusion !== "success" ||
-    ci.repository?.full_name !== c.REPOSITORY
+    ci.repository?.full_name !== c.REPOSITORY ||
+    (run.actor.login === c.FACTORY_APP &&
+      (String(ci.id) !== proof.ciRunId || !c.factoryAppCIOK(ci)))
   )
     return false;
-  const artifact = await api.request("GET", `${ROOT}/actions/artifacts/${candidate.artifact.id}`);
-  return (
-    artifact.id === candidate.artifact.id &&
-    artifact.name === candidate.artifact.name &&
+  const artifact = await api.request("GET", `${ROOT}/actions/artifacts/${artifactProof.id}`);
+  return artifact.id === artifactProof.id &&
+    artifact.name === artifactProof.name &&
     artifact.expired === false &&
-    artifact.digest === candidate.artifact.digest &&
+    artifact.digest === artifactProof.digest &&
     artifact.workflow_run?.id === Number(proof.runId) &&
     artifact.workflow_run?.head_sha === proof.head &&
     Number.isSafeInteger(artifact.size_in_bytes) &&
     artifact.size_in_bytes > 0 &&
     artifact.size_in_bytes <= 4000000
-  );
+    ? audit
+    : false;
 }
 async function verifyDiscoveryIssue(
   api,
@@ -181,6 +189,7 @@ async function verifyDiscoveryIssue(
   if (matches.length !== 1) return null;
   const r = matches[0];
   if (
+    (requireCurrent && !require("./discovery-functional.cjs").eligibleCandidate(r.candidate)) ||
     !require("./discovery-publication.cjs").issueMatches(issue, r) ||
     !["published", "held-evidence", ...(!requireCurrent ? ["repair-merged"] : [])].includes(
       r.status
@@ -254,6 +263,7 @@ async function verifyRepairOrigin(api, issue, finding, { requireCurrent = false 
   return c.digest(record.intake) === c.digest(finding.intake);
 }
 module.exports = {
+  verifySweepSource,
   producer,
   successfulJob,
   verifySource,

@@ -1,6 +1,7 @@
 const { createHash } = require("node:crypto");
 const REPOSITORY = "haideearus/cypress-realworld-app-settings-rehearsal";
 const OWNER = "haideearus";
+const OWNER_ID = 101267861;
 const BOT = "github-actions[bot]";
 const BOT_ID = 41898282;
 const SHA = /^[a-f0-9]{40}$/;
@@ -11,7 +12,15 @@ const LANES = Object.freeze({
   app: "factory-automatic.yml",
   dependency: "factory-dependencies.yml",
 });
+const DRAIN_LANES = Object.freeze({
+  ".github/workflows/factory-automatic.yml": "app",
+  ".github/workflows/factory-dependencies.yml": "dependency",
+  ".github/workflows/factory-agents.yml": "app",
+  ".github/workflows/factory-discovery.yml": "app",
+});
 const MAX_RECEIPTS = 1200;
+class StaleWakeSource extends Error {}
+
 const exact = (o, keys) =>
   o &&
   typeof o === "object" &&
@@ -26,11 +35,31 @@ const actor = (a) =>
   /^[a-zA-Z0-9][a-zA-Z0-9[\]-]{0,100}$/.test(a.login) &&
   Number.isSafeInteger(a.id) &&
   a.id > 0;
+const isDependencyCI = (signal) =>
+  signal.kind === "dependency-ci" || signal.kind === "dependency-alert-ci";
+// Older workflow revisions also read this registry and accept the existing drain kind.
+const preparationRevision = (attempt) => `preparation:${attempt}`;
+const isPreparationDrain = (signal) =>
+  signal.kind === "drain" && signal.revision === preparationRevision(signal.sourceAttempt);
+const isQueueCheckDrain = (signal) =>
+  signal.kind === "drain" && signal.revision === `queue-check:${signal.sourceAttempt}`;
+const isMainQueueCheck = (signal) => signal.kind === "drain" && signal.revision === "main-queue";
+const isAppMergeDrain = (signal) => signal.kind === "drain" && signal.revision === "app-merge";
+const isAppRelease = (signal) => signal.kind === "drain" && signal.revision === "app-release";
+const isAppQueueCheck = (signal) =>
+  isMainQueueCheck(signal) || isAppMergeDrain(signal) || isAppRelease(signal);
+const isInterruptedApp = (signal) =>
+  signal.kind === "drain" && signal.revision === "app-interrupted";
 function validateSignal(s) {
   if (
     !exact(s, "kind,lane,number,head,criteriaHash,revision,sourceRun,sourceAttempt,actor") ||
-    !["issue", "monitor", "finding", "dependency-ci", "drain"].includes(s.kind) ||
+    (!["issue", "monitor", "finding", "drain"].includes(s.kind) && !isDependencyCI(s)) ||
     !LANES[s.lane] ||
+    (s.kind === "dependency-alert-ci" && s.lane !== "dependency") ||
+    ((isPreparationDrain(s) || isQueueCheckDrain(s)) && s.lane !== "dependency") ||
+    (isMainQueueCheck(s) &&
+      (s.lane !== "app" || s.sourceAttempt !== 1 || String(s.number) !== s.sourceRun)) ||
+    ((isAppMergeDrain(s) || isAppRelease(s) || isInterruptedApp(s)) && s.lane !== "app") ||
     !Number.isSafeInteger(s.number) ||
     s.number < 1 ||
     !SHA.test(s.head) ||
@@ -89,6 +118,7 @@ function validateReceipt(r) {
     !HASH.test(r.id) ||
     sourceKey(r.signal) !== r.id ||
     !["pending", "observed", "intent", "sent", "bound"].includes(r.status) ||
+    (isPreparationDrain(r.signal) && !["pending", "observed"].includes(r.status)) ||
     !time(r.at)
   )
     throw Error("Invalid wake receipt");
@@ -140,6 +170,7 @@ function receiverIdentity(c, lane) {
 module.exports = {
   REPOSITORY,
   OWNER,
+  OWNER_ID,
   BOT,
   BOT_ID,
   SHA,
@@ -147,10 +178,21 @@ module.exports = {
   ID,
   WORKFLOW,
   LANES,
+  DRAIN_LANES,
   MAX_RECEIPTS,
+  StaleWakeSource,
   exact,
   digest,
   actor,
+  isDependencyCI,
+  preparationRevision,
+  isPreparationDrain,
+  isQueueCheckDrain,
+  isMainQueueCheck,
+  isAppMergeDrain,
+  isAppRelease,
+  isAppQueueCheck,
+  isInterruptedApp,
   createWake,
   sourceKey,
   validateSignal,

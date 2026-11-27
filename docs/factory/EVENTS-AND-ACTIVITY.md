@@ -13,6 +13,15 @@ It explicitly dispatches the existing automatic/dependency workflow on `main`.
 The existing cron paths remain available. Owner harness PR CI never requests an
 automatic Claude review.
 
+Every ten minutes the owner-scheduled **Automatic factory** checks the app queue,
+including due retries and recoverable PRs. When that job finds no app ticket,
+**Factory event wake** checks whether the shared slot is free. It can hand off
+one verified dependency CI receipt, an eligible merge recovery, or a model-free
+tracking and rebase scan. An acknowledged rebase comment stays recorded for
+its original head and base while later scans can handle other PRs. The hourly
+**Dependency maintenance** schedule remains a fallback for owner-run recovery.
+GitHub may delay the schedule, so new events still use immediate pickup.
+
 The receiver must be a real `github-actions[bot]` dispatch, verified against its
 GitHub run, workflow identity, main SHA, first attempt and a durable wake receipt.
 An arbitrary input string, label, public issue or bot username is insufficient.
@@ -108,28 +117,43 @@ can bind/reconcile it; never blindly resend the POST. A failed/cancelled produce
 cannot grant a later new reservation. Existing cron can still inspect the queue
 under ordinary limits; no counter or receipt is erased to manufacture a retry.
 
-Activity publication uses a CAS intent, a deterministic comment marker, a bounded
-comment lookup and an acknowledged comment ID. If a POST may have succeeded, a
-later observation reconciles the matching bot comment. If proof is unavailable,
-the intent stays held; no duplicate comment is sent speculatively.
+Activity publication uses a compare-and-swap intent, a deterministic comment
+marker and an acknowledged comment ID. After an ambiguous POST, the publisher
+looks for the same marker and verified bot author. It narrows the search to the
+source run's lifetime and reads up to 20 pages. An incomplete search leaves the
+receipt open for reconciliation and other events can still be published.
 
-Registries retain replay identities and unresolved intents. The initial bounds
-are 1,200 wake receipts, 1,400 activity records and one megabyte per registry;
-lookup examines at most 1,000 journal comments. On saturation, hold the affected
-metadata work and report owner maintenance. There is no automatic deletion,
-counter reset, unsafely compacted replay index or hidden model attempt. Bound
-maintenance is a later explicit operation; do not manually erase branches.
+The next activity write upgrades a legacy registry in place. It keeps queued and
+unresolved receipts in `activity.json` and moves each acknowledged event ID and
+comment ID to its own file in the same `factory/activity` commit. Later writes
+preserve those files. Older Git commits and journal comments retain full event
+history. A replay checks one event's archive path at the same commit used to
+claim publication.
 
-The activity observer polls actual job/step metadata every 20 seconds during a
-bounded 80-minute window on an in-progress source event. A separate completion
-observer captures later final results. Entries may therefore lag by a poll or by
-GitHub delivery. Only allowlisted source workflows are observed: neither the wake
-nor activity workflow is a `workflow_run` source, and issue comments are never a
-wake source. Explicit dispatch separates repeated handoffs from observer chaining.
+The activity hot file retains its one-megabyte bound and its 1,400 unresolved
+receipt limit. The wake registry retains its separate 1,200-receipt bound.
+If unresolved activity fills the hot file, inspect the retained receipts and
+journal before recovering publication. Keep the registry branch and its history.
 
-An early observer waits for receiver binding without binding or authorizing it.
-A receiver that finishes before binding is reported as held, never as a model or
-review result. Stale dependency candidates produce typed refresh holds with PR
+Routine workflows get one lifecycle observation on completion. Their in-progress
+events can still appear as skipped runs in Actions. GitHub skips the observer job
+before allocating a runner or making API requests. Completion still publishes
+typed results such as failed checks, review verdicts, and protected merges.
+
+Production deployments get one early observation. The journal records that
+human approval is required after preparation, then the observer exits. A
+separate completion event records the approval and deployment outcome.
+Only allowlisted source workflows are observed. The wake and activity
+workflows are excluded, and issue comments never wake the factory.
+
+The factory checks for a dispatched CI run every 30 seconds until it knows the
+run ID. It then checks status at 60-second intervals and sends GitHub's ETag
+when available. An authenticated `304 Not Modified` response reuses the last
+status without consuming primary rate limit. The polling deadline is preserved.
+The controller reads fresh run and job evidence before recording a CI result.
+
+The completion observer verifies the receiver binding before reporting model or
+review outcomes. An unbound receiver is reported as held. Stale dependency candidates produce typed refresh holds with PR
 links rather than an idle-queue claim.
 
 Stop request, result and resume notifications come from the retained owner-command

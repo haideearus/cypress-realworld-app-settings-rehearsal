@@ -19,11 +19,14 @@ function nextCycleSlot(slot) {
   return cycle === policy.MAX_CODING_ATTEMPTS ? null : `cycle${cycle + 1}`;
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const CI_POLL_MS = 30000;
-const QUOTA_WAIT_OPERATIONS = new Set(["ci", "review", "assess", "assess_pr"]);
+const CI_DISCOVERY_POLL_MS = 30000;
+const CI_STATUS_POLL_MS = 60000;
+const CI_MAX_POLLS = 60;
+const CI_POLL_BUDGET_MS = (CI_MAX_POLLS - 1) * CI_DISCOVERY_POLL_MS;
+const QUOTA_WAIT_OPERATIONS = new Set(["ci", "review", "assess", "assess_pr", "preflight_pr"]);
 const identity = (ctx, extra = {}) => ({ ...ctx, ...extra });
 class Controller {
-  constructor(api, config, context, { sleep = delay, maxPolls = 60 } = {}) {
+  constructor(api, config, context, { sleep = delay, maxPolls = CI_MAX_POLLS } = {}) {
     this.api = api;
     this.ledger = new Ledger(api);
     this.config = config;
@@ -90,6 +93,7 @@ class Controller {
     await this.rejectDrillIssue(issue);
     let monitor = null;
     let finding = null;
+    let feature = null;
     if (
       automatic &&
       !issue.labels?.some(
@@ -97,16 +101,22 @@ class Controller {
       )
     )
       throw new Error("Automatic admission needs a trusted factory-ready issue");
-    if (automatic && issue.user?.login !== policy.OWNER) {
+    if (require("./feature-contract.cjs").marked(issue)) {
+      if (!automatic || !["pilot", "live"].includes(this.config.featureMode))
+        throw Error("Feature ticket requires the enabled automatic feature path");
+      feature = await require("./feature-origin.cjs").verifyFeatureIssue(this.api, issue, {
+        mode: this.config.featureMode,
+      });
+      if (!feature) throw Error("Feature ticket lacks a trusted publication receipt");
+    }
+    if (automatic && !feature && issue.user?.login !== policy.OWNER) {
       monitor = await verifyMonitorIssue(this.api, issue);
       if (!monitor && this.config.discovery)
         finding = await require("./discovery-origin.cjs").findingForAdmission(this.api, issue);
       if (!monitor && !finding)
         throw new Error("Automatic admission needs an owner or verified incident/finding issue");
     }
-    const main = await this.api.request("GET", `${ROOT}/branches/main`);
-    if (finding && finding.intake.head !== main.commit?.sha)
-      throw Error("Discovery finding needs a new current-main replay");
+    const mainMoved = Error("Main advanced. A fresh automatic pickup on current main is required.");
     const snapshot = await this.ledger.read();
     const previous = snapshot.state.tickets[String(ticket)];
     if (automatic && previous) throw new Error("Automatic ticket already admitted");
@@ -121,9 +131,52 @@ class Controller {
       if (error.status !== 404) throw error;
       if (previous?.pr) throw new Error("Published agent branch is missing");
     }
-    const saved = await this.ledger.update(async (state) => {
+    const admitCurrent = async (state) => {
       const existing = state.tickets[String(ticket)];
       if (automatic && existing) throw new Error("Automatic ticket already admitted");
+      const turns = require("./feature-turn.cjs");
+      const turn = automatic ? turns.priority(state, this.config) : null;
+      const priorityFeature = feature && turn?.ticket === ticket;
+      const production =
+        monitor && monitor.probeMode !== require("./functional-discovery-contract.cjs").PROBE_MODE;
+      if (turn && !priorityFeature && !production) throw Error(turns.WAITING);
+      if (feature) {
+        const fresh = await this.issue(ticket);
+        if (
+          !(await require("./feature-origin.cjs").verifyFeatureIssue(this.api, fresh, {
+            mode: this.config.featureMode,
+            proof: feature,
+          }))
+        )
+          throw Error("Feature origin changed before admission");
+        const { repairsWaiting, productionIncident } = require("./feature-priority.cjs");
+        if (
+          priorityFeature
+            ? slots.usedCapacity(state) ||
+              slots.pendingIntent(state) ||
+              (await productionIncident(this.api))
+            : slots.activeEntries(state).some((entry) => state.tickets[entry.ticket]?.feature) ||
+              (await repairsWaiting(this.api, this.config, this.context, state))
+        )
+          throw Error("Another active ticket or ready repair precedes this feature");
+        if (priorityFeature) {
+          try {
+            const tested = await require("./discovery-run.cjs").testedMain(
+              this.api,
+              { workflowSha: this.context.workflowSha },
+              {}
+            );
+            if (tested.head !== this.context.workflowSha) throw Error(turns.TESTED_MAIN);
+          } catch (error) {
+            throw new Error(turns.TESTED_MAIN, { cause: error });
+          }
+        }
+      }
+      const main = await this.api.request("GET", `${ROOT}/branches/main`);
+      if (!policy.SHA.test(main.commit?.sha || "")) throw Error("Invalid current main revision");
+      if (automatic && main.commit.sha !== this.context.workflowSha) throw mainMoved;
+      if (finding && finding.intake.head !== main.commit.sha)
+        throw Error("Discovery finding needs a new current-main replay");
       if (monitor) {
         const current = await verifyMonitorIssue(this.api, issue, { proof: monitor });
         if (!current || JSON.stringify(current) !== JSON.stringify(monitor))
@@ -142,9 +195,11 @@ class Controller {
           ([id, other]) =>
             id !== String(ticket) &&
             (other.automatic || other.dependency) &&
+            (!other.feature || feature || slots.activeFor(state, Number(id))) &&
             !other.findingApiRecovery &&
             other.status === "reviewed" &&
-            !["merged", "closed"].includes(other.merge?.status)
+            !["merged", "closed"].includes(other.merge?.status) &&
+            (!other.dependency || require("./dependency-merge-retry.cjs").blocksQueue(other))
         )
       )
         throw new Error("Pending automatic merge must be reconciled");
@@ -172,9 +227,17 @@ class Controller {
         };
       if (monitor) result.state.tickets[String(ticket)].monitor = monitor;
       if (finding) result.state.tickets[String(ticket)].finding = finding;
+      if (feature) result.state.tickets[String(ticket)].feature = feature;
+      if (priorityFeature) turns.update(result.state, turn.runId, { status: "finished" });
       return result;
-    });
-    return this.result(saved.grant);
+    };
+    try {
+      const saved = await this.ledger.update(admitCurrent);
+      return this.result(saved.grant);
+    } catch (error) {
+      if (error !== mainMoved) throw error;
+      return { ready: false, reason: mainMoved.message };
+    }
   }
   async currentTicket(ticket) {
     const loaded = await this.ledger.read();
@@ -183,10 +246,7 @@ class Controller {
     if (t.origin === "drill") throw new Error("Drill tickets cannot enter ordinary factory work");
     return { ...loaded, ticket: t };
   }
-  async admitPR(ticket, prNumber) {
-    this.authorize();
-    if (!this.config.enabled)
-      return { ready: false, reason: "Factory disabled; no model invocation" };
+  async ownerReviewTarget(ticket, prNumber) {
     if (!Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error("Invalid owner PR");
     const issue = await this.issue(ticket);
     await this.rejectDrillIssue(issue);
@@ -200,6 +260,24 @@ class Controller {
       !pr.head?.ref
     )
       throw new Error("Review needs an open owner-authored PR in this repository targeting main");
+    return { issue, pr };
+  }
+  async preflightOwnerReview(ticket, prNumber) {
+    this.authorize();
+    if (!this.config.enabled)
+      return { ready: false, reason: "Factory disabled; no model invocation" };
+    const { pr } = await this.ownerReviewTarget(ticket, prNumber);
+    const { state } = await this.ledger.read();
+    policy.assertNotStopped(state);
+    return { ready: true, head: pr.head.sha };
+  }
+  async admitPR(ticket, prNumber, expectedHead) {
+    this.authorize();
+    if (!this.config.enabled)
+      return { ready: false, reason: "Factory disabled; no model invocation" };
+    const { issue, pr } = await this.ownerReviewTarget(ticket, prNumber);
+    if (expectedHead !== undefined && pr.head.sha !== expectedHead)
+      throw new Error("Owner PR head changed after review preflight");
     const saved = await this.ledger.update((state) => {
       const previous = state.tickets[String(ticket)];
       if (previous?.criteriaHash && previous.criteriaHash !== criteriaHash(issue))
@@ -230,15 +308,24 @@ class Controller {
     if (t.origin === "dependency-pr") {
       const d = require("./dependency-contract.cjs");
       const attempt = d.matches(t, this.context, this.config);
-      d.prOK(pr);
+      d.prOK(pr, false, this.config);
+      const receipt = await require("./dependency-alert-repair.cjs").verifyAlertPR(
+        this.api,
+        pr,
+        this.config
+      );
       if (
         pr.number !== t.pr ||
         pr.head.sha !== t.head ||
         pr.head.ref !== t.branch ||
-        pr.base.sha !== attempt.base
+        (receipt?.base ?? pr.base.sha) !== attempt.base
       )
         throw new Error("Dependency PR identity changed");
-      d.filesOK(await this.api.request("GET", `${ROOT}/pulls/${t.pr}/files?per_page=3`));
+      if (!receipt || receipt.base === pr.base.sha)
+        d.alertFilesOK(
+          await this.api.request("GET", `${ROOT}/pulls/${t.pr}/files?per_page=3`),
+          receipt
+        );
       return pr;
     }
     if (
@@ -385,7 +472,7 @@ class Controller {
     )
       throw new Error("CI reservation changed");
   }
-  async validateCI(runId, head, reservation) {
+  async validateCI(runId, head, reservation, expectedAttempt) {
     if (!Number.isSafeInteger(runId) || runId < 1) throw new Error("Invalid CI run ID");
     if (
       !reservation ||
@@ -400,9 +487,10 @@ class Controller {
       run.display_title !== `Factory CI / ${reservation.requestId}` ||
       run.event !== "workflow_dispatch" ||
       run.path !== ".github/workflows/factory-ci.yml" ||
-      run.status !== "completed"
+      run.status !== "completed" ||
+      (expectedAttempt !== undefined && run.run_attempt !== expectedAttempt)
     )
-      throw new Error("CI does not cover the expected head");
+      throw new Error("CI does not cover the expected head or run attempt");
     const jobs = await this.api.pages(`${ROOT}/actions/runs/${runId}/jobs`, "jobs");
     const verified = jobs.filter((job) => job.name === "verify");
     return {
@@ -422,6 +510,8 @@ class Controller {
     policy.assertNotStopped(state);
     this.activeRun(state, ticket);
     await this.matchingPR(t);
+    const recovery = require("./published-review-recovery.cjs");
+    if (recovery.recoveryParent(t, this.context)) await recovery.assertRecoveryBase(this.api, t);
     const existing = t.ci?.head === t.head ? t.ci : null;
     const requestId = existing?.requestId ?? randomUUID();
     const branch = t.branch || `agent/factory-${ticket}`;
@@ -471,11 +561,15 @@ class Controller {
       return matching[0];
     };
     let knownRunId = null;
+    let remainingPollTime = CI_POLL_BUDGET_MS;
+    const pollCache = {};
     for (let count = 0; count < this.maxPolls; count++) {
       const run =
         knownRunId === null
           ? await findRun()
-          : await this.api.request("GET", `${ROOT}/actions/runs/${knownRunId}`);
+          : await this.api.request("GET", `${ROOT}/actions/runs/${knownRunId}`, undefined, {
+              pollCache,
+            });
       if (knownRunId !== null && (run.id !== knownRunId || !matches(run)))
         throw new Error("CI dispatch identity changed");
       if (run?.status === "completed") {
@@ -510,7 +604,11 @@ class Controller {
         if (!Number.isSafeInteger(run.id) || run.id < 1) throw new Error("Invalid CI run ID");
         knownRunId = run.id;
       }
-      if (count + 1 < this.maxPolls) await this.sleep(CI_POLL_MS);
+      if (count + 1 >= this.maxPolls || remainingPollTime === 0) break;
+      const interval = knownRunId === null ? CI_DISCOVERY_POLL_MS : CI_STATUS_POLL_MS;
+      const pause = Math.min(remainingPollTime, interval);
+      await this.sleep(pause);
+      remainingPollTime -= pause;
     }
     throw new Error("Timed out waiting for the exact-head CI run");
   }
@@ -518,9 +616,10 @@ class Controller {
     this.authorize();
     const { ticket: t } = await this.currentTicket(ticket);
     await this.matchingPR(t);
+    const recovery = require("./published-review-recovery.cjs");
     const ci = await this.validateCI(ciId, t.head, t.ci);
     if (!ci.passed) throw new Error("CI failed; independent review not admitted");
-    const result = await this.ledger.update((state) => {
+    const result = await this.ledger.update(async (state) => {
       const current = state.tickets[String(ticket)];
       if (
         current.head !== t.head ||
@@ -530,6 +629,10 @@ class Controller {
         current.ci?.passed !== true
       )
         throw new Error("Ledger head or saved CI changed");
+      if (recovery.recoveryParent(current, this.context)) {
+        policy.assertNotStopped(state);
+        await recovery.assertRecoveryBase(this.api, current);
+      }
       return policy.reserve(
         state,
         identity(this.context, { ticket, phase: "review", slot, head: t.head }),
@@ -560,7 +663,7 @@ class Controller {
             g.slot === "cycle1" &&
             g.runId === active.runId &&
             g.runAttempt === active.runAttempt &&
-            require("./delayed-retry.cjs").ordinary(t) &&
+            require("./delayed-retry.cjs").retryableTicket(t) &&
             !t.delayedRetry &&
             t.coding === 1 &&
             t.reviews === 0 &&
@@ -579,6 +682,8 @@ class Controller {
           }
         }
       const keepFeedback = t.delayedRetry?.parent && t.status === "retry" && t.feedback;
+      const recovery = require("./published-review-recovery.cjs");
+      if (reason === recovery.STALE_REASON) recovery.recordStaleParent(t);
       t.status = "blocked";
       t.approval = null;
       if (!keepFeedback) t.feedback = reason;
@@ -590,11 +695,27 @@ class Controller {
   }
   async assess(ticket, results, ciId, reviewGrantId, bundle, slot) {
     this.authorize();
+    const recovery = require("./published-review-recovery.cjs");
+    const recoveryTicket =
+      results.coding === "skipped" &&
+      results.publication === "skipped" &&
+      slot === "cycle1" &&
+      (await this.currentTicket(ticket)).ticket;
+    const resuming = recovery.recoveryParent(recoveryTicket, this.context);
+    if (resuming && results.review !== "success") {
+      try {
+        await recovery.assertRecoveryBase(this.api, recoveryTicket);
+      } catch (error) {
+        if (error instanceof recovery.RecoveryStaleBase)
+          return this.block(ticket, recovery.STALE_REASON);
+        throw error;
+      }
+    }
     if (
-      results.coding !== "success" ||
-      results.publication !== "success" ||
+      (!resuming && (results.coding !== "success" || results.publication !== "success")) ||
       results.ci !== "success"
     ) {
+      if (resuming) return this.block(ticket, recovery.INTERRUPTED_REASON);
       let gatewayJob;
       if (
         this.config.priorityRetry &&
@@ -623,7 +744,9 @@ class Controller {
       if (results.review !== "success")
         return this.block(
           ticket,
-          "Review unavailable, interrupted, or subscription quota exhausted"
+          resuming
+            ? recovery.INTERRUPTED_REASON
+            : "Review unavailable, interrupted, or subscription quota exhausted"
         );
       if (bundle?.kind !== "review" || bundle.grantId !== reviewGrantId || bundle.base !== t.head)
         throw new Error("Invalid review artifact identity");
@@ -635,7 +758,7 @@ class Controller {
           identity(this.context, { ticket, phase: "review", slot, head: t.head }),
           this.config
         );
-        const status = review.verdict === "pass" ? "reviewed" : "retry";
+        const status = review.verdict === "pass" ? "reviewed" : resuming ? "blocked" : "retry";
         const next = policy.finish(state, reviewGrantId, {
           status,
           head: t.head,
@@ -650,6 +773,10 @@ class Controller {
         await this.gate(t.pr);
         return { retry: false, reviewed: true, pr: t.pr, head: t.head };
       }
+      if (resuming)
+        return { retry: false, reason: "Independent review requested changes during recovery" };
+    } else if (resuming) {
+      return this.block(ticket, "Fresh CI failed during published repair recovery");
     } else {
       await this.ledger.update((original) => {
         const state = structuredClone(original);
@@ -850,7 +977,14 @@ async function main(env = process.env) {
   }
   const api = new GitHub({
     token: env.GH_TOKEN,
-    retryReads: ["publish", "saved_ci_review", "assess_saved_ci_review"].includes(operation),
+    retryReads: [
+      "publish",
+      "review",
+      "saved_ci_review",
+      "assess_saved_ci_review",
+      "preflight_pr",
+    ].includes(operation),
+    retryInternalReads: operation === "review",
     waitOnQuota: QUOTA_WAIT_OPERATIONS.has(operation),
     onQuotaWait: (until) => console.log(`GitHub API quota exhausted; waiting until ${until}`),
   });
@@ -870,8 +1004,13 @@ async function main(env = process.env) {
     case "admit":
       result = await controller.admit(ticket, { recover: inputs.operation === "recover" });
       break;
+    case "preflight_pr":
+      result = await controller.preflightOwnerReview(ticket, Number(inputs.pr));
+      break;
     case "admit_pr":
-      result = await controller.admitPR(ticket, Number(inputs.pr));
+      if (!policy.SHA.test(inputs.expectedHead || ""))
+        throw new Error("Owner review admission requires its preflight head");
+      result = await controller.admitPR(ticket, Number(inputs.pr), inputs.expectedHead);
       break;
     case "publish":
       result = await controller.publish(inputs.grantId, readJson(env.FACTORY_BUNDLE_PATH));

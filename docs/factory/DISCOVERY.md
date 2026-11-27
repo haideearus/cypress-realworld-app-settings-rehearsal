@@ -6,14 +6,22 @@ under owner harness issue #85. It does not enable discovery or publish bug ticke
 ## What the new role does
 
 `Proactive app discovery` inspects a successful, current-main push-CI revision.
-It rotates session/authentication, feed/pagination, profile/form and synthetic
-journey charters. A separately enabled discovery session can read the frozen
-source, propose new Vitest/API/Cypress tests and inspect bounded test results.
-The model cannot edit the app, existing tests, configuration or dependencies.
+New sweeps rotate among public-feed pagination, ordinary directory search, the
+notifications list and the Settings profile. The selector prefers the least recently reserved eligible
+charter, so each area can get a turn even when only one session runs per day.
+The second reservation of a day excludes the charter already reserved that day,
+including when `main` has moved.
+The model can read a small set of relevant frontend files at the frozen revision,
+choose input combinations for its assigned charter and inspect the test results.
+The broker turns approved inputs into API tests or browser journeys against
+synthetic sessions in a disposable app. The model cannot supply executable test
+text or change the app, existing tests, configuration or dependencies. The
+scheduled Safe functional discovery browser workflow continues to cover sign-in,
+navigation and Settings separately.
 
-The only model tools are a checksum-checked local stdio broker's six operations:
-list/read manifest source, write a new test, run a fixed batch, read a batch
-result and write a structured report. There are no built-in file, shell,
+The model uses seven operations from a checksum-checked local broker. It can
+list and read charter source, submit an API scenario or browser journey, run a
+batch, read a result, and write a structured report. There are no built-in file, shell,
 network, general MCP, child-agent or publication tools. Only the single model
 step receives the existing Claude Pro OAuth secret. There is no API-key input,
 alternative provider, Cypress recording or paid service integration.
@@ -47,14 +55,47 @@ and synthetic session login. External identity providers, production PostgreSQL
 and object storage are explicitly skipped coverage. This is neither a production
 browser probe nor a claim that every page or backend path was tested.
 
+## Model-selected browser journeys
+
+Claude can choose which supported screens to visit, their order, and a typed
+scenario for the final screen. The journey can traverse the feed, Settings,
+Notifications, new transaction, and bank-account screens in one disposable copy.
+The trusted broker turns the structured journey into a Cypress spec, using the
+existing isolated browser and synthetic seed data. The transaction variants
+can submit one fixed demo payment or request between seeded users in that copy
+and verify the stored result and visible receipt.
+
+Browser runs and API runs share four batch slots per sweep. The run summary
+shows the actual pages, variant, and pass or follow-up outcome. Browser evidence
+is retained with the sweep. An exact approved browser failure can start the
+model-free confirmation in Safe functional discovery. The existing API
+finding intake continues to verify API failures independently.
+
+The browser handoff currently supports single-screen Settings invalid or
+required email, required first name, and an empty Notifications view. It uses
+the first eligible failed batch in a completed sweep. Safe functional discovery
+verifies the source and replays the corresponding checked-in assertion twice
+on fresh disposable app instances. A repeated failure can create or update an
+incident with `factory-ready` under the existing publication limit. The issue
+links the sweep and the fixed replay. Other failures remain in sweep evidence.
+
 ## Budgets and retained state
 
 - `FACTORY_DISCOVERY_ENABLED` is opt-in; absent/false disables model admission.
-- Two discovery reservations per Europe/Bucharest day, sharing the existing
-  twenty-ticket admission cap and configured execution capacity. Each source
+- Two discovery reservations per Europe/Bucharest day by default. To allow a
+  third, set the repository Actions variable
+  `FACTORY_MAX_DISCOVERY_SWEEPS_PER_DAY=3`. A third sweep requires at least 25%
+  of the GitHub job token's current core allowance at selection, reservation,
+  and before Claude starts. Unavailable quota data holds the third sweep. All sweeps share
+  the twenty-ticket admission cap and configured execution capacity. Each source
   receives one `discover` grant, with zero coding/review attempts.
 - Failed builds, provider rejection, invalid reports, interruption and failed
   replay retain consumed reservations. No automatic model retries or refunds.
+- Replay and finalization wait for a confirmed GitHub API quota reset for up to
+  65 minutes per job. Replay refreshes its state checks after a wait and keeps a
+  five-minute execution budget per finding. Both jobs use the original evidence
+  and grant. If finalization cannot write the ledger within that budget, the
+  saved reservation remains available for owner reconciliation.
 - Up to four exploration batches per session, each with a five-minute outer
   deadline; the existing turn/minute limits still bound the model step.
 - Up to eight proposal files, two candidate findings and bounded text/log output.
@@ -70,26 +111,63 @@ intents. Each successful source issue is an unlabelled audit record, never a
 against the exact bot-authored body, not resent speculatively.
 
 Ready repairs and active work take priority over new sweeps. Successful main CI
-and fallback UTC cron windows request discovery; the selector filters fallback
-hours to 03:12/15:12 Bucharest, subject to GitHub delay. These are opportunities,
-not promises of two runs or reliable timer delivery. The manual path uses the
-same counters. Automatic paths additionally require automatic pickup enabled.
-No cron receipt alone is an admission. Ordinary stop/quarantine controls apply.
+and the 03:12 and 15:12 Europe/Bucharest schedules request discovery. Setting the
+limit to three also enables the 21:12 schedule. A charter already used on that
+day stays excluded after a new push. GitHub can
+start a scheduled run late or skip it. A delayed start still checks the current
+release, repair queue, and durable budget for the day it actually runs. Manual
+runs use the same counters. Automatic paths also require automatic pickup.
+The repository's pinned Software Factory GitHub App may start a sweep after
+successful same-repository main push CI. Manual dispatch and schedule require
+the owner. Stop and quarantine controls apply to every trigger.
+
+## Reading the run summaries
+
+Open **Proactive app discovery → Summary** for executed scenario coverage, what
+was skipped, and what the replay verified. A report with zero findings describes
+the scenarios executed in that run. The summary flags coverage as partial below
+three distinct completed cases. Claude is prompted to cover three cases
+across the API charter and browser journeys and can execute up to four. The
+second and optional third sweep ask for two distinct browser journeys within
+that same batch limit. Repeats, timeouts and
+incomplete sandbox runs do not count toward the coverage target. Look in **Verified discovery finding intake →
+Summary** for links to published issues and their current-main verification
+results. **Safe functional discovery → Summary** reports the browser suite
+separately, including sign-in, navigation, Settings and form assertions.
+Look there for a browser handoff result after a completed Claude sweep.
+
+Finding intake keeps its cap of four new ticket intents per Bucharest day.
+Review Claude Pro's five-hour and weekly usage before enabling the third sweep.
 
 ## Candidate evidence and replay
 
-Candidate reports preserve the exact source/grant identity, original test text
-and hash, executed commands/modes, bounded raw RED logs, checked scenarios and
-skipped coverage. Reported coverage is model-authored; actual batch receipts are
-reported separately. A zero-finding report does not claim exhaustive testing.
+Candidate reports preserve the exact source/grant identity, generated test text
+and hash, executed scenarios, bounded raw RED logs, checked scenarios and
+skipped coverage. The broker supplies ticket titles and summaries. A finding
+must match its latest failing generated test, and the trusted replay checks the
+same contract independently. A zero-finding report covers only the inputs tested.
 
 A new credential-free job verifies the successful model step and retained
 reservation, rebuilds the exact source/baseline and replays each proposed failure
 twice against independent fresh data. It separately evaluates a fixed trusted
-oracle twice in fresh sandboxes. Initial oracles cover unexpected server errors,
-unauthenticated protected-route access, the existing feed pagination contract
-and access to another synthetic user's owner-only endpoint. Requests accept only
-fixed routes and bounded query fields. They cannot specify commands or URLs.
+oracle twice in fresh sandboxes. Feed scenarios use positive page and page size
+values from 1 to 25. Directory scenarios use short plain-text search terms and
+check for server errors. The notifications charter uses one read-only
+`GET /notifications` from the pinned synthetic account in every case. Its three
+cases check the list response, the known seeded unread items, and the display
+fields and supported types of returned items. Case selectors stay in the broker
+and trusted verifier. The app receives the same path without query parameters.
+The Settings charter uses a read-only `GET /checkAuth`. Its three cases check
+the active profile identity, seeded fields displayed in Settings, and the saved
+default transaction preference. Both the generated tests and the independent
+verifiers confirm that sign-in identifies the seeded account before either read.
+
+Notifications and Settings evidence record the case, HTTP status and the
+verifier's boolean checks. They omit notification rows and profile field values.
+The independent replay must observe the same contract failure twice before intake can
+publish a ticket. An absent synthetic fixture or failed sign-in holds the
+finding. A successful intake rechecks the finding on current `main` before
+repair can start. The broker controls all request targets, methods and sessions.
 
 Generated assertions, logs, screenshots and model opinions cannot establish
 these oracles. Unsupported expectations, inconsistent failures, setup failures
@@ -97,9 +175,10 @@ and ambiguous behavior remain held/triage reports. A verified candidate is not
 a repair, independent review or merge approval.
 
 The [finding-intake stage](DISCOVERY-INTAKE.md) connects individually verified
-evidence to deduplicated tickets, current-main replay and normal repair intake.
-It has its own explicit metadata setup and stays disabled with discovery off.
-Discovery completion alone creates no ready issue and approves/merges nothing.
+functional evidence to deduplicated tickets, current-main replay and normal
+repair intake. Older exploratory charters and their findings remain in history.
+Intake has its own explicit metadata setup and requires discovery to be enabled.
+Verified replay and the ordinary repair gates govern admission and merge.
 
 ## Later owner rollout
 

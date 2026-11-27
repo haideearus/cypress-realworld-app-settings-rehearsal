@@ -1,8 +1,12 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
+const { functionalChecks } = require("../factory/functional-discovery-contract.cjs");
 
-function report(failures = {}) {
-  const tests = ["sign-in", "navigation", "settings", "form-validation"].map((check) => {
+const checks = functionalChecks();
+
+function report(failures = {}, extended = false) {
+  const checks = functionalChecks(extended);
+  const tests = checks.map((check) => {
     const error = failures[check];
     const state = error ? "failed" : "passed";
     return {
@@ -15,11 +19,17 @@ function report(failures = {}) {
     };
   });
   const count = Object.keys(failures).length;
-  const stats = { tests: 4, passes: 4 - count, failures: count, pending: 0, skipped: 0 };
+  const stats = {
+    tests: checks.length,
+    passes: checks.length - count,
+    failures: count,
+    pending: 0,
+    skipped: 0,
+  };
   return {
     browserName: "electron",
-    totalTests: 4,
-    totalPassed: 4 - count,
+    totalTests: stats.tests,
+    totalPassed: stats.passes,
     totalFailed: count,
     totalPending: 0,
     totalSkipped: 0,
@@ -34,6 +44,27 @@ function report(failures = {}) {
   };
 }
 
+test("missing sign-in field labels can qualify as a verified browser assertion", async () => {
+  const failure = report({ "sign-in-accessibility": assertion("sign-in-password-label") });
+  assert.deepEqual(await verify(failure, failure), {
+    status: "confirmed_failure",
+    check: "sign-in-accessibility",
+    assertion: "sign-in-password-label",
+    passedChecks: checks.filter((id) => id !== "sign-in-accessibility"),
+  });
+});
+
+test("inconclusive browser summary shows unconfirmed coverage with no pass claim", () => {
+  const { browserSummary } = require("../factory/functional-browser.cjs");
+  assert.equal(typeof browserSummary, "function", "browser checks need an Actions summary");
+  const summary = browserSummary({ status: "inconclusive", check: "", assertion: "" });
+  assert.match(summary, /none confirmed/i);
+  assert.match(summary, /Browser sign-in/i);
+  assert.match(summary, /sign-in field labels/i);
+  assert.match(summary, /Skipped coverage[\s\S]*writes[\s\S]*production/i);
+  assert.doesNotMatch(summary, /passed/i);
+});
+
 const inconclusive = { status: "inconclusive", check: "", assertion: "" };
 const healthy = { status: "healthy", check: "", assertion: "" };
 
@@ -43,12 +74,78 @@ function assertion(id, detail = "expected a visible element") {
 
 async function verify(...reports) {
   const { inspectAttempt, verifyFunctionalChecks } = require("../factory/functional-browser.cjs");
-  const verdict = await verifyFunctionalChecks(async () => inspectAttempt(reports.shift()));
-  assert.equal(reports.length, 0, "unexpected number of browser invocations");
+  const verdict = await verifyFunctionalChecks(async () => {
+    assert.notEqual(reports.length, 0, "too many browser invocations");
+    return inspectAttempt(reports.shift());
+  });
+  assert.equal(reports.length, 0, "too few browser invocations");
   return verdict;
 }
 
-test("all four passing checks produce a healthy verdict without a retry", async () => {
+test("new browser journeys confirm only exact approved repeat failures", async () => {
+  for (const [check, id] of [
+    ["transaction-form-validation", "transaction-submit-disabled"],
+    ["notifications-populated", "notifications-seed-items"],
+    ["notifications-empty", "notifications-empty-view"],
+    ["feed-tabs", "feed-mine-selected"],
+  ]) {
+    const failure = report({ [check]: assertion(id) });
+    assert.deepEqual(await verify(failure, failure), {
+      status: "confirmed_failure",
+      check,
+      assertion: id,
+      passedChecks: checks.filter((known) => known !== check),
+    });
+  }
+});
+
+test("weekly runs require the full suite and match repeat failures by check and assertion", async () => {
+  const { inspectAttempt, verifyFunctionalChecks } = require("../factory/functional-browser.cjs");
+  const weekly = report(
+    {
+      "request-acceptance": assertion("request-acceptance-balances"),
+    },
+    true
+  );
+  assert.equal(inspectAttempt(report(), true), undefined);
+  assert.equal(inspectAttempt(weekly), undefined);
+  const evidence = inspectAttempt(weekly, true);
+  const verdict = await verifyFunctionalChecks(async () => evidence, true);
+  assert.equal(verdict.status, "confirmed_failure");
+  assert.equal(verdict.check, "request-acceptance");
+  assert.equal(verdict.assertion, "request-acceptance-balances");
+  assert.match(
+    require("../factory/functional-browser.cjs").browserSummary(verdict, true),
+    /Weekly full browser regression/
+  );
+});
+
+test("the longer discovery journeys require an extended run and repeat their own assertions", async () => {
+  const { inspectAttempt, verifyFunctionalChecks } = require("../factory/functional-browser.cjs");
+  const extendedChecks = functionalChecks(true);
+  for (const [check, id] of [
+    ["payment-persistence", "payment-receipt-opened"],
+    ["notification-read-persistence", "notification-read-reloaded"],
+    ["mobile-feed-filters", "mobile-filters-reset"],
+    ["bank-account-deletion", "bank-deletion-onboarding"],
+  ]) {
+    assert.ok(!checks.includes(check), check);
+    const attempt = report({ [check]: assertion(id) }, true);
+    const evidence = inspectAttempt(attempt, true);
+    assert.deepEqual(
+      await verifyFunctionalChecks(async () => evidence, true),
+      {
+        status: "confirmed_failure",
+        check,
+        assertion: id,
+        passedChecks: extendedChecks.filter((known) => known !== check),
+      },
+      check
+    );
+  }
+});
+
+test("all passing checks produce a healthy verdict without a retry", async () => {
   assert.deepEqual(await verify(report()), healthy);
 });
 
@@ -68,7 +165,103 @@ test("two invocations reporting the same typed assertion confirm its fixed check
       status: "confirmed_failure",
       check: "form-validation",
       assertion: "settings-email-required",
+      passedChecks: checks.filter((id) => id !== "form-validation"),
     }
+  );
+});
+
+test("the onboarding classifier accepts its own repeated, named failure", async () => {
+  const failure = report({ "bank-account-onboarding": assertion("onboarding-save-rejected") });
+  assert.deepEqual(await verify(failure, failure), {
+    status: "confirmed_failure",
+    check: "bank-account-onboarding",
+    assertion: "onboarding-save-rejected",
+    passedChecks: checks.filter((id) => id !== "bank-account-onboarding"),
+  });
+});
+
+test("multiple repeated failures select one assertion in catalog order", async () => {
+  const first = report({
+    settings: assertion("settings-profile"),
+    "form-validation": assertion("settings-email-required"),
+  });
+  const second = report({
+    settings: assertion("settings-profile"),
+    "form-validation": assertion("settings-email-required"),
+  });
+  first.runs[0].tests.reverse();
+  const result = await verify(first, second);
+  assert.equal(result.status, "confirmed_failure");
+  assert.equal(result.check, "settings");
+  assert.equal(result.assertion, "settings-profile");
+
+  const { browserSummary } = require("../factory/functional-browser.cjs");
+  const summary = browserSummary(result);
+  assert.match(summary, /Opening Settings — failed at `settings-profile`/);
+  assert.match(summary, /Settings form validation — unconfirmed/);
+  assert.match(summary, /Browser sign-in — passed/);
+});
+
+test("a targeted replay confirms only the requested named assertion", async () => {
+  const { inspectAttempt, verifyFunctionalChecks } = require("../factory/functional-browser.cjs");
+  const target = { check: "form-validation", assertion: "settings-email-required" };
+  const bothFail = inspectAttempt(
+    report({
+      settings: assertion("settings-profile"),
+      "form-validation": assertion("settings-email-required"),
+    })
+  );
+  const unrelatedFailure = inspectAttempt(report({ settings: assertion("settings-profile") }));
+  assert.deepEqual(await verifyFunctionalChecks(async () => bothFail, false, target), {
+    ...target,
+    status: "confirmed_failure",
+    passedChecks: checks.filter((id) => !["settings", "form-validation"].includes(id)),
+  });
+  assert.deepEqual(
+    await verifyFunctionalChecks(async () => unrelatedFailure, false, target),
+    inconclusive
+  );
+  assert.deepEqual(
+    await verifyFunctionalChecks(() => assert.fail("invalid target should not run"), false, {
+      ...target,
+      assertion: "settings-profile",
+    }),
+    inconclusive
+  );
+});
+
+test("only unchanged assertion IDs are eligible when browser attempts disagree", async () => {
+  const result = await verify(
+    report({
+      settings: assertion("settings-profile"),
+      "form-validation": assertion("settings-email-invalid"),
+    }),
+    report({
+      settings: assertion("settings-form"),
+      "form-validation": assertion("settings-email-invalid"),
+      "sign-in-accessibility": assertion("sign-in-password-label"),
+    })
+  );
+  assert.equal(result.status, "confirmed_failure");
+  assert.equal(result.check, "form-validation");
+  assert.equal(result.assertion, "settings-email-invalid");
+
+  const { browserSummary } = require("../factory/functional-browser.cjs");
+  const summary = browserSummary(result);
+  assert.match(summary, /Opening Settings — unconfirmed/);
+  assert.match(summary, /Sign-in field labels — unconfirmed/);
+});
+
+test("a repeated assertion cannot be confirmed by a malformed or partial browser retry", async () => {
+  const known = assertion("settings-email-required");
+  const valid = report({ "form-validation": known });
+  const partial = report({ "form-validation": known });
+  partial.runs[0].tests.pop();
+
+  assert.deepEqual(await verify(valid, partial), inconclusive);
+  assert.deepEqual(
+    await verify(valid, report({ "form-validation": known, settings: assertion("unknown-check") })),
+    inconclusive
   );
 });
 
@@ -88,7 +281,7 @@ test("unrecognized, untyped, misplaced and mixed failures are inconclusive", asy
     report({ "form-validation": { ...known, name: "TypeError" } }),
     report({ "form-validation": { ...known, message: `Application error: ${known.message}` } }),
     report({ settings: known }),
-    report({ "form-validation": known, settings: assertion("settings-profile") }),
+    report({ "form-validation": known, settings: assertion("unknown-check") }),
   ]) {
     assert.deepEqual(await verify(badReport), inconclusive);
   }
@@ -106,7 +299,7 @@ test("boot errors, partial results, skipped tests, and another spec cannot repor
   const browserError = report();
   browserError.runs[0].error = "browser crashed";
   const inconsistent = report();
-  inconsistent.runs[0].stats.passes = 3;
+  inconsistent.runs[0].stats.passes = 4;
   for (const badReport of [
     undefined,
     { status: "failed", failures: 1 },
@@ -167,5 +360,39 @@ test("the app and browser child environment excludes Actions file commands and c
       HOME: "fixture-home",
       DISPLAY: ":1",
     }
+  );
+});
+
+test("each weekly replay gets its own loopback database and cleans only that fixture", async () => {
+  const { withFreshWeeklyDatabase } = require("../factory/functional-browser.cjs");
+  const existing = "postgresql://fixture:fixture@127.0.0.1:5432/rwa_test";
+  const observed = [];
+  const statements = [];
+  class Client {
+    constructor({ connectionString }) {
+      assert.equal(connectionString, existing);
+    }
+    async connect() {}
+    async query(sql) {
+      statements.push(sql);
+    }
+    async end() {}
+  }
+  for (let i = 0; i < 2; i++)
+    await withFreshWeeklyDatabase(
+      existing,
+      async (uri) => observed.push(new URL(uri).pathname),
+      Client
+    );
+  assert.notEqual(observed[0], observed[1]);
+  for (const [i, path] of observed.entries()) {
+    assert.match(path, /^\/factory_weekly_[a-f0-9]{32}_test$/);
+    const name = path.slice(1);
+    assert.equal(statements[i * 2], `CREATE DATABASE "${name}"`);
+    assert.equal(statements[i * 2 + 1], `DROP DATABASE "${name}" WITH (FORCE)`);
+  }
+  await assert.rejects(
+    withFreshWeeklyDatabase("postgresql://fixture@production.example/rwa_test", () => {}, Client),
+    /Disposable loopback/
   );
 });

@@ -11,6 +11,13 @@ and original finding proof; it does not automatically retry or enable discovery.
 
 ## What qualifies
 
+Normal discovery intake accepts the functional-feed and functional-directory
+charters. The finding must carry the canonical generated test hash and trusted
+title and summary for its validated scenario. The queue checks these again
+before a new repair reservation. Older reports, including saved recovery
+evidence, stay in history and are excluded from normal intake and new automatic
+admission.
+
 A finding needs an actual finished Claude subscription discovery grant, the
 exact source audit issue, successful discovery/model/replay jobs, and a retained
 nonexpired evidence artifact identified by run, artifact ID and digest. Report
@@ -22,7 +29,7 @@ Unsupported expectations and ambiguous, flaky, environment or startup failures
 remain held. Fixture evidence cannot enter production finding publication.
 Discovery is bounded exploration; it does not prove complete app coverage.
 
-The bank-account and private-transaction isolation contracts additionally require
+Historical bank-account and private-transaction isolation receipts additionally require
 verified distinct synthetic sessions and successful owner/participant reads.
 They use fixed seed records, authenticated readers and empty oracle queries.
 The existing current-head intake and repair RED/GREEN use the same trusted
@@ -32,10 +39,7 @@ from the private-transaction contract.
 
 Historical evidence with `oracle: null`, including both candidates from discovery
 run 44179920739, stays held. Its artifact, report, test hashes and consumed grant
-are not replaced, reinterpreted or refunded. A future, separately authorized
-discovery report can select a supported privacy contract, preserve its actual
-failing proposal and earn independent replay proof before ordinary publication.
-That later run and any repair are not started when this PR is prepared or merged.
+remain in the audit record.
 
 ## Publication and history
 
@@ -56,8 +60,10 @@ symptom, independent of commit or model title. Duplicate evidence is appended
 in comments; frozen ticket criteria are never rewritten. An observed-resolved
 finding retains its history and a later recurrence gets a new generation.
 Protected factory merges are recorded separately as **repair merged**, preserving
-the admitted origin receipt. New recurrence evidence must descend from the
-recorded resolution or merge commit; older source evidence stays a duplicate.
+the admitted origin receipt. The production closure workflow completes the issue
+after verifying the deployed repair, then intake records the confirmed closure.
+New recurrence evidence must descend from the recorded resolution or merge
+commit. Older source evidence stays a duplicate.
 
 Issue/comment intent is retained before a non-idempotent request. An unknown
 response is reconciled against exact bot-authored content within five pages;
@@ -65,6 +71,22 @@ it is never resent speculatively and never refunds its allowance. An intent
 known not to have started may resume after the stop is cleared. Request and
 confirmation producer identities are retained separately. Labels or bot names
 alone never establish trusted origin.
+
+## Sweep audit closure
+
+After live intake, the model-free **Close completed sweep records after intake**
+step closes the original bot-authored audit issue as completed when the sweep
+has verified source evidence and either yielded zero findings or every finding
+has a confirmed ticket and a retained ready or observed-resolved replay.
+Duplicates also need a confirmed link to the existing ticket. Failed or
+unfinished browser journeys keep the audit record open for follow-up even
+when API intake finds nothing. Holds, missing evidence and older imports
+without a closure receipt also stay open. An interrupted close can be verified by a later live intake.
+
+Closure changes only the issue state and its closure reason. The issue body,
+comments, labels, run links, finding and replay receipts, and usage history
+remain available. Evidence artifacts retain their existing expiration policy.
+The repair tickets have their own lifecycle and close separately.
 
 ## Current-main replay and repair
 

@@ -1,29 +1,46 @@
 const slots = require("./active-tickets.cjs");
 const policy = require("./policy.cjs");
 const d = require("./dependency-contract.cjs");
-function pending(state, except) {
+function pending(state, except, now) {
   return Object.entries(state.tickets).some(
     ([id, t]) =>
       Number(id) !== except &&
       (t.automatic || t.dependency) &&
+      (!t.feature || t.merge?.status === "intent" || slots.activeFor(state, Number(id))) &&
       !t.findingApiRecovery &&
       t.status === "reviewed" &&
-      !["closed", "merged"].includes(t.merge?.status)
+      !["closed", "merged"].includes(t.merge?.status) &&
+      (!t.dependency || require("./dependency-merge-retry.cjs").blocksQueue(t, now))
   );
 }
-function claimDependency(original, pr, context, config, now = new Date()) {
+function claimDependency(original, pr, context, config, now = new Date(), alertReceipt) {
   policy.validateState(original);
   policy.assertNotStopped(original);
   policy.authorize(context);
-  d.prOK(pr);
+  d.prOK(pr, false, config);
+  if (
+    d.alertKey(pr.head.ref) &&
+    (alertReceipt?.pr !== pr.number ||
+      alertReceipt?.head !== pr.head.sha ||
+      alertReceipt?.base !== pr.base.sha ||
+      alertReceipt?.phase !== "ready")
+  )
+    throw new Error("Dependency alert claim requires a current receipt");
   if (!d.contextOK(context)) throw new Error("Unauthorized dependency workflow");
   if (!config.enabled || !config.automatic || !config.minutes || !config.turns || !config.reviews)
     throw new Error("Dependency factory disabled");
-  if (context.wake && !config.eventPickup) throw new Error("Event pickup disabled");
+  const turns = require("./feature-turn.cjs");
+  if (turns.priority(original, config, now)) throw Error(turns.WAITING);
+  if (context.wake) {
+    if (!config.eventPickup) throw new Error("Event pickup disabled");
+    const target = require("./trusted-wake.cjs").dependencyWakeTarget(context);
+    if (target?.number !== pr.number || target.head !== pr.head.sha)
+      throw new Error("Dependency PR does not match the verified CI wake");
+  }
   if (
     !slots.capacity(original, config.concurrent) ||
     slots.activeFor(original, pr.number) ||
-    pending(original, pr.number)
+    pending(original, pr.number, now)
   )
     throw new Error("An active ticket or pending merge holds the factory lock");
   const state = structuredClone(original),
@@ -47,7 +64,8 @@ function claimDependency(original, pr, context, config, now = new Date()) {
   } else {
     const day = policy.dayKey(now, config.timezone),
       admissions = state.days[day] || [];
-    if (admissions.length >= config.daily) throw new Error("Daily ticket limit reached");
+    if (policy.dailyAdmissions(state, day) >= config.daily)
+      throw new Error("Daily ticket limit reached");
     state.days[day] = [...admissions, pr.number];
     state.tickets[id] = {
       coding: 0,
@@ -86,6 +104,7 @@ function claimDependency(original, pr, context, config, now = new Date()) {
   t.approval = null;
   t.ci = null;
   delete t.analysis;
+  delete t.dependencyMergeRetry;
   slots.claimActive(
     state,
     { ticket: pr.number, runId: context.runId, runAttempt: context.runAttempt },
@@ -149,7 +168,10 @@ function finishPreparation(original, ticket, context) {
     throw new Error("Dependency preparation lock cannot be released");
   t.status = "blocked";
   t.approval = null;
-  t.feedback = "Dependency preparation held; no model invocation";
+  const evidence = d.validateTicket(t).evidence?.at(-1);
+  t.feedback = evidence?.reason
+    ? d.EVIDENCE_REASONS[evidence.reason]
+    : "Dependency preparation held; no model invocation";
   slots.releaseActive(state, { ticket, runId: context.runId, runAttempt: context.runAttempt });
   policy.audit(state, "dependency_preparation_blocked", {
     ticket,

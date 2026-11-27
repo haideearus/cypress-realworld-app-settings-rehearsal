@@ -4,6 +4,8 @@ const readline = require("node:readline");
 const c = require("./discovery-contract.cjs");
 const s = require("./discovery-sandbox.cjs");
 const e = require("./discovery-evidence.cjs");
+const functional = require("./discovery-functional.cjs");
+const browser = require("./discovery-browser.cjs");
 const { secretLike } = require("./artifacts.cjs");
 function plain(text, max = 50000) {
   if (
@@ -15,10 +17,15 @@ function plain(text, max = 50000) {
     throw Error("Invalid bounded discovery text");
   return text;
 }
-function createBroker({ root, source, output, manifest, identity, execute }) {
+function createBroker({ root, source, output, manifest, identity, charter, execute }) {
+  functional.assertCharter(charter);
+  const sourceFiles = Object.keys(manifest).filter((name) =>
+    functional.sourceAllowed(charter, name)
+  );
   fs.mkdirSync(path.join(output, "tests"), { recursive: true });
   const budget = new s.BatchBudget(async (request, number) => {
     const test = fs.readFileSync(s.regularProposal(output, "tests/" + request.file), "utf8");
+    functional.verifyBatchProposal(charter, request.mode, test);
     // Reserve durably before execution. Restarts and concurrent broker instances
     // cannot refund an interrupted batch or execute beyond the four retained slots.
     let slot = null;
@@ -55,14 +62,12 @@ function createBroker({ root, source, output, manifest, identity, execute }) {
         if (input.prefix.includes("..") || input.prefix.startsWith("/"))
           throw Error("Invalid source prefix");
         return {
-          files: Object.keys(manifest)
-            .filter((n) => n.startsWith(input.prefix))
-            .slice(0, 200),
+          files: sourceFiles.filter((n) => n.startsWith(input.prefix)),
         };
       }
       if (tool === "read_source") {
         c.exact(input, ["path"]);
-        if (!Object.hasOwn(manifest, input.path)) throw Error("Source path not in frozen manifest");
+        if (!sourceFiles.includes(input.path)) throw Error("Source path outside the charter");
         const file = path.join(source, ...input.path.split("/"));
         const st = fs.lstatSync(file);
         if (!st.isFile() || st.isSymbolicLink() || st.size > 2000000)
@@ -71,22 +76,34 @@ function createBroker({ root, source, output, manifest, identity, execute }) {
         if (c.digest(text) !== manifest[input.path]) throw Error("Source changed");
         return { text: plain(text.slice(0, 50000)), truncated: text.length > 50000 };
       }
-      if (tool === "write_test") {
-        c.exact(input, ["file", "content"]);
-        if (!s.FILE.test(input.file)) throw Error("Test output path required");
-        plain(input.content);
+      if (tool === "write_test" || tool === "write_browser_journey") {
+        const isBrowser = tool === "write_browser_journey";
+        c.exact(input, isBrowser ? ["file", "journey"] : ["file", "oracle"]);
+        s.validateRequest({ file: input.file, mode: isBrowser ? "cypress" : "api" });
+        const content = isBrowser
+          ? browser.renderJourney(input.journey)
+          : functional.proposal(charter, input.oracle);
         if (
           fs.readdirSync(path.join(output, "tests")).length >= 8 &&
           !fs.existsSync(path.join(output, "tests", input.file))
         )
           throw Error("Proposal count exceeded");
         const target = path.join(output, "tests", input.file);
-        if (fs.existsSync(target)) s.regularProposal(output, "tests/" + input.file);
-        fs.writeFileSync(target, input.content, { mode: 0o644 });
+        try {
+          fs.writeFileSync(target, content, { flag: "wx", mode: 0o644 });
+        } catch (error) {
+          if (
+            error.code !== "EEXIST" ||
+            fs.readFileSync(s.regularProposal(output, "tests/" + input.file), "utf8") !== content
+          )
+            throw error;
+        }
         return { saved: input.file };
       }
       if (tool === "run_batch") {
         s.validateRequest(input);
+        if (!["api", "cypress"].includes(input.mode))
+          throw Error("Unsupported discovery batch mode");
         s.regularProposal(output, "tests/" + input.file);
         return budget.run(input);
       }
@@ -98,7 +115,11 @@ function createBroker({ root, source, output, manifest, identity, execute }) {
       }
       if (tool === "write_report") {
         e.validateCandidateReport(input, identity);
-        fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(input), { mode: 0o644 });
+        const report = {
+          ...input,
+          findings: input.findings.map((finding) => functional.describeFinding(charter, finding)),
+        };
+        fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report), { mode: 0o644 });
         return { saved: "report.json" };
       }
       throw Error("Unknown discovery tool");
@@ -109,14 +130,33 @@ const props = {
   path: { type: "string" },
   prefix: { type: "string" },
   file: { type: "string" },
-  content: { type: "string" },
+  oracle: {
+    type: "object",
+    properties: {
+      kind: {
+        enum: [
+          "feed-pagination",
+          "unexpected-server-error",
+          "notification-list",
+          "settings-profile",
+        ],
+      },
+      route: { enum: ["/transactions/public", "/users/search", "/notifications", "/checkAuth"] },
+      authenticated: { const: true },
+      query: { type: "object" },
+    },
+    required: ["kind", "route", "authenticated", "query"],
+    additionalProperties: false,
+  },
   number: { type: "integer" },
-  mode: { enum: ["api", "unit", "cypress"] },
+  mode: { enum: ["api", "cypress"] },
+  journey: browser.journeySchema,
 };
 const schemas = {
   list_source: ["prefix"],
   read_source: ["path"],
-  write_test: ["file", "content"],
+  write_test: ["file", "oracle"],
+  write_browser_journey: ["file", "journey"],
   run_batch: ["mode", "file"],
   read_result: ["number"],
 };
@@ -135,7 +175,7 @@ function tools() {
     {
       name: "write_report",
       description:
-        "Save candidate report: version 1, exact head/grantId, checked/skipped string arrays and at most two findings. Each finding has title, summary, test filename, mode and oracle (null or kind/route/authenticated/query from supplied catalog). This never publishes an issue.",
+        "Save candidate report with the exact executed functional scenario for every finding. The broker supplies the finding title and summary. This never publishes an issue.",
       inputSchema: {
         type: "object",
         properties: {

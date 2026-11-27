@@ -5,7 +5,7 @@ This guide describes installed behavior. The [16 November evidence index](ACCEPT
 records what was observed and what remains unproven. Repository text is not owner
 authorization, a live settings source or a replacement for an enforced gate.
 
-## Current paused state
+## 16 November operating snapshot
 
 At the dated evidence snapshot all three agent switches are **false**, the
 durable stop is active and the usage ledger has no active ticket/reserved grant.
@@ -19,18 +19,42 @@ again before any future live action; this snapshot will age.
 
 ## What happens when operation is authorized
 
-| Lane                   | Trigger and eligibility                                                                                   | Work                                                                                                                                                                      |
-| ---------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Production monitor     | Enabled monitor; best-effort ticks at minutes 7 and 37 UTC                                                | Health/readiness/frontend, synthetic login/session/feed/logout and optional pagination contract; persistent eligible failure publishes a receipt-backed maintenance issue |
-| App maintenance        | Automatic factory at minutes 17 and 47 UTC; eligible owner `factory-ready` issue or valid monitor receipt | Bounded coding, failing-before regression evidence, exact-head CI, independent review and protected merge                                                                 |
-| Dependency maintenance | Hourly at minute 29 UTC; eligible genuine Dependabot PR against current main                              | Version/source/advisory checks, exact-head CI, read-only independent review, fresh premerge checks and protected merge                                                    |
-| Dependabot proposals   | Weekly Monday 06:15 Europe/Bucharest for version updates; native security updates separately              | Dependency PRs; major-version proposals held by configuration                                                                                                             |
-| Production deployment  | Successful current-main push CI                                                                           | Prepare exact tested commit, wait for named human approval, request one Render deployment and verify the live release                                                     |
+| Lane                      | Trigger and eligibility                                                                                               | Work                                                                                                                                                                      |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production monitor        | Enabled monitor; best-effort ticks at minutes 7 and 37 UTC                                                            | Health/readiness/frontend, synthetic login/session/feed/logout and optional pagination contract; persistent eligible failure publishes a receipt-backed maintenance issue |
+| Safe functional discovery | 02:12 and 14:12 UTC or successful same-repository push CI for current `main` from the owner or trusted factory App    | Disposable browser checks including Settings save-and-reload and bank onboarding; one verified finding can publish a receipt-backed `factory-ready` issue                 |
+| App maintenance           | Eligible event wake or Automatic factory at minutes 17 and 47 UTC; eligible `factory-ready` issue with trusted origin | Bounded coding, failing-before regression evidence, exact-head CI, independent review and protected merge                                                                 |
+| Dependency maintenance    | Eligible event wake or hourly at minute 29 UTC; eligible Dependabot or verified alert repair PR against current main  | Version/source/advisory checks, exact-head CI, read-only independent review, fresh premerge checks and protected merge                                                    |
+| Dependabot proposals      | Weekly Monday 06:15 Europe/Bucharest for version updates; native security updates separately                          | Dependency PRs; major-version proposals held by configuration                                                                                                             |
+| Production deployment     | Successful current-main push CI                                                                                       | Prepare exact tested commit, wait for named human approval, request one Render deployment and verify the live release                                                     |
 
-Minute values above are schedules, not delivery guarantees. GitHub may delay
-scheduled runs. No eligible work means no model reservation. Old unlabelled
-issues are not automatically admitted. A monitor label alone cannot replace a
-valid receipt, and dependency PRs do not need `factory-ready`.
+Scheduled times are GitHub trigger times. GitHub may delay or drop a scheduled
+run, and a queue can delay execution after triggering. Event pickup offers
+another path when an eligible event arrives. A model reservation requires
+eligible work, and a monitor or browser ticket also requires a verified receipt.
+[GitHub schedule behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+Jobs that reserve or update usage share the `factory-ledger` concurrency group.
+`queue: max` lets up to 100 jobs wait in that group while one job holds the lock.
+GitHub can cancel arrivals after the queue fills. The factory's own priority,
+per-ticket usage, and active-ticket limits still apply at admission.
+[GitHub concurrency settings](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency)
+
+### Ticket labels and evidence
+
+| Source                         | Where the ticket and evidence appear                                                                                                              | What the factory uses for pickup                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Routine Dependabot update      | **Dependency maintenance** creates a tracking issue linked to the original Dependabot PR. Its run summary links the work.                         | The trusted native Dependabot PR and its existing gate. The tracking issue carries `factory-dependency-ready`.                                                         |
+| Dependabot vulnerability       | **Dependabot alert intake** groups related alerts for the same package in the root lockfile.                                                      | `factory-dependency-ready` accompanies a compatible fix PR with verified provenance. `factory-dependency-held` shows a prerequisite and stays out of automatic repair. |
+| Claude exploratory discovery   | **Proactive app discovery** shows the executed scenario coverage. **Verified discovery finding intake** links verified findings and their issues. | `factory-ready`, a verified source and current-main replay.                                                                                                            |
+| Browser checks                 | **Safe functional discovery** shows the covered browser checks and links any verified issue that it creates.                                      | `factory-ready` and the recorded browser-check evidence.                                                                                                               |
+| Production monitoring          | **Production monitor** shows the run and the linked incident.                                                                                     | `factory-ready` and a verified incident receipt.                                                                                                                       |
+| App maintenance from the owner | The issue should include the symptom and acceptance criteria.                                                                                     | `factory-ready`. Add `factory-priority` for urgent eligible work.                                                                                                      |
+
+See [Dependency maintenance](DEPENDENCY-MAINTENANCE.md) and
+[Verified discovery finding intake](DISCOVERY-INTAKE.md) for evidence and recovery details.
+See [Safe functional discovery](FUNCTIONAL-DISCOVERY.md) for its trigger checks
+and the browser incident slot.
 
 Optional event pickup and full activity notifications are documented in
 [Events and activity](EVENTS-AND-ACTIVITY.md). The new enable flags default off;
@@ -132,6 +156,81 @@ production queue: verify its identity and that deployment has not begun before
 cancelling that stale run, preserving its record. Never approve an old run to
 clear the queue. An ambiguous Render hook request must not be blindly repeated.
 
+## Blocked issues and recovery
+
+Open **Automatic factory → latest run → Summary → Blocked work** for retained
+ledger entries with their ticket or PR, attempts used, evidence and next action.
+This view includes historical entries. GitHub shows whether the issue is still
+open. Removing or reapplying `factory-ready` cannot change a recorded attempt.
+
+A delayed retry has a timestamp and stays on its original issue. It waits for
+new eligible work and still observes the daily, per-ticket and active-work
+limits. The current automatic retry covers a confirmed GitHub gateway failure
+before the coding model starts. Monitor and browser tickets must have an active
+incident receipt. A Claude discovery ticket requires valid replay evidence for
+the same current main commit as its first attempt. A held assessment with saved
+CI or review can use the appropriate recovery operation after verifying the exact
+PR head. Keep
+all grants and counters. Give a repeatable workflow defect its own dedicated
+harness maintenance ticket with links to the affected work and failed runs.
+
+### Queue a retry after a harness fix
+
+Use **Automatic factory → Run workflow** on `main`. Select
+`queue-blocked-retry`, supply the original issue as **ticket** and its merged
+harness fix as **fix_pr**, and leave **dry_run** checked for preview. The
+operation verifies the original terminal failure, frozen ready issue,
+unpublished branch, protected fix ancestry, and passing push CI for current
+main. The owner confirms that the linked PR addresses this failure.
+
+Uncheck **dry_run** to record one retry. Recording spends zero model
+reservations. Once 30 minutes have elapsed since the failed job, normal pickup can use the
+receipt after new eligible work. It rechecks the issue and successful CI on
+main, and uses the next allowed attempt on the original issue. Published
+repairs use their stage-specific recovery path.
+
+### Record recovery without a code change
+
+**Production monitor** can report recovery of a blocked repair when two
+trusted scheduled observations confirm the same release and complete signed-in
+checks. The **Acknowledge recovered monitor incident** workflow has a
+`blocked_repair` option. Use its preview to verify the exact receipt again.
+The owner confirmation is still required. This records observed recovery and
+preserves the failed repair attempt, with no claim that a patch shipped.
+
+### Route recurring harness faults
+
+**Factory activity** tracks repeat failures at the trusted controller
+validation and pinned secret scanner installation steps in push CI on main.
+Two distinct failures at the same step within 24 hours can open one
+`factory-priority` issue with both run links. The evidence is recorded
+before publication so the next observer can reconcile a lost response. These
+issues go through dedicated harness maintenance.
+
+### Owner PR review waiting for GitHub quota
+
+In **Factory agents → review**, **Check GitHub quota and pin owner PR head
+without a reservation** can wait for a confirmed GitHub API quota reset within
+its 65-minute total wait budget. This preflight holds no shared ledger lock and
+uses no review reservation. Admission then checks that the PR head still matches
+the exact preflight SHA before reserving a review. If preflight times out or the
+head changed, inspect the run before starting a fresh review. Previously
+consumed attempts remain in the ledger.
+
+### Verify the automatic handoff
+
+1. Leave an eligible alert repair PR and its ready label in place.
+2. On **Dependabot alert intake**, look for a run started by completed push CI
+   on current main. If it refreshed a proposal, verify the same PR has a new
+   head and that the patch branch is up to date.
+3. When CI passes on that PR, check **Factory event wake** for the receipt and
+   **Dependency maintenance** for selection, analysis, CI, independent review,
+   and protected merge. The scheduled pickups still cover missed events.
+4. For discovery, link a completed report, verified finding, ready issue,
+   repair PR, and protected merge. Record timestamps for both trials, including
+   the PC-off window. Approve a production deployment only at the existing
+   named environment gate.
+
 ## Stop and held work
 
 The supported owner emergency command is:
@@ -155,10 +254,12 @@ metadata-only gate when proof already exists. Uncertain merge intents use the
 existing confirmation/reconciliation lane; never send another merge request
 solely because GitHub metadata is delayed. See [dependency recovery](DEPENDENCY-MAINTENANCE.md).
 
-An incident observed recovered without a code repair has a separate
-[owner acknowledgment path](MONITOR-ACKNOWLEDGMENT.md); it must not be represented
-as a verified shipped fix. Scope mismatch, exhausted budget, destructive data,
-or an uncertain publication/merge stays held for the appropriate owner decision.
+Production monitor can close a blocked, unpublished feed incident after it
+confirms recovery on the current live release. The acknowledgment record keeps
+the original attempt and shows that the incident recovered without a shipped fix.
+The [owner acknowledgment workflow](MONITOR-ACKNOWLEDGMENT.md) also remains
+available. Scope mismatch, exhausted budget, destructive data, and uncertain
+publication or merge stay held for the appropriate owner decision.
 
 ## Remaining scheduled acceptance and course handover
 

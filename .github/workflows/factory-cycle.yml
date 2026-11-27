@@ -18,6 +18,10 @@ on:
         type: boolean
         required: false
         default: false
+      review_only:
+        type: boolean
+        required: false
+        default: false
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -36,6 +40,7 @@ permissions:
   contents: read
 jobs:
   coding:
+    if: ${{ !inputs.review_only }}
     permissions:
       actions: read
       contents: read
@@ -63,6 +68,7 @@ jobs:
     concurrency:
       group: factory-ledger
       cancel-in-progress: false
+      queue: max
     outputs:
       ready: ${{ steps.control.outputs.ready }}
       pr: ${{ steps.control.outputs.pr }}
@@ -93,7 +99,7 @@ jobs:
           github_token: ${{ inputs.automatic == false && github.token || steps.app.outputs.token }}
   ci:
     needs: publish
-    if: ${{ needs.publish.outputs.ready == 'true' }}
+    if: ${{ always() && !cancelled() && (needs.publish.outputs.ready == 'true' || (inputs.automatic && inputs.review_only)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 110
     permissions:
@@ -116,7 +122,7 @@ jobs:
           parameters: ${{ toJSON(inputs) }}
   reserve_review:
     needs: [publish, ci]
-    if: ${{ needs.ci.outputs.passed == 'true' }}
+    if: ${{ always() && !cancelled() && needs.ci.outputs.passed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     permissions:
@@ -126,6 +132,7 @@ jobs:
     concurrency:
       group: factory-ledger
       cancel-in-progress: false
+      queue: max
     outputs:
       ready: ${{ steps.control.outputs.ready }}
       grantId: ${{ steps.control.outputs.grantId }}
@@ -144,7 +151,7 @@ jobs:
             {"ticket":"${{ inputs.ticket }}","ciId":"${{ needs.ci.outputs.runId }}","slot":"${{ inputs.slot }}"}
   review:
     needs: reserve_review
-    if: ${{ needs.reserve_review.outputs.ready == 'true' }}
+    if: ${{ !cancelled() && needs.reserve_review.result == 'success' && needs.reserve_review.outputs.ready == 'true' }}
     permissions:
       actions: read
       contents: read
@@ -172,6 +179,7 @@ jobs:
     concurrency:
       group: factory-ledger
       cancel-in-progress: false
+      queue: max
     outputs:
       retry: ${{ steps.control.outputs.retry }}
       grantId: ${{ steps.control.outputs.grantId }}

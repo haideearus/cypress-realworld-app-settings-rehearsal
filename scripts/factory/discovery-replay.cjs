@@ -64,6 +64,7 @@ async function assessCandidates({
   before = async () => {},
   run = s.sandbox,
   now = Date.now,
+  quotaWaited = () => 0,
 }) {
   // Treat proposals as inert data. Only the isolated sandbox receives their paths.
   const b = structuredClone(bundle);
@@ -75,7 +76,10 @@ async function assessCandidates({
   const findings = [];
   for (const [index, finding] of b.report.findings.entries()) {
     const original = selected[index];
-    const deadlineAt = now() + 300000;
+    const startedAt = now();
+    const waitedAtStart = quotaWaited();
+    // Only bounded GitHub quota sleeps extend the shared execution deadline.
+    const deadline = () => startedAt + 300000 + (quotaWaited() - waitedAtStart);
     const folder = path.join(output, String(index));
     const tests = path.join(folder, "tests");
     // Fresh directories and exclusive creation prevent sibling proposals or existing paths
@@ -85,6 +89,7 @@ async function assessCandidates({
     fs.writeFileSync(path.join(tests, finding.test), original.test, { flag: "wx", mode: 0o644 });
     let interrupted;
     const checkDeadline = () => {
+      const deadlineAt = deadline();
       if (!Number.isFinite(deadlineAt) || now() >= deadlineAt)
         throw Error("Discovery replay five-minute finding deadline");
     };
@@ -98,7 +103,7 @@ async function assessCandidates({
           interrupted = { error };
           throw error;
         }
-        const result = await run({ image, ...options, deadlineAt });
+        const result = await run({ image, ...options, deadlineAt: deadline() });
         try {
           checkDeadline();
         } catch (error) {
@@ -139,6 +144,7 @@ async function assessCandidates({
     if (interrupted) throw interrupted.error;
     findings.push({ finding, original, proposedReplays, ...verified });
   }
+  const browserLeads = require("./discovery-browser-handoff.cjs").browserLeads(b);
   return {
     version: 1,
     head: b.head,
@@ -152,12 +158,17 @@ async function assessCandidates({
       file: batch.file,
       testHash: batch.testHash,
       code: batch.result.code,
+      ...(batch.mode === "cypress"
+        ? { networkIsolated: batch.result.networkIsolated === true }
+        : {}),
     })),
     findings,
+    ...(browserLeads.length ? { browserLeads } : {}),
+    ...(b.browserFollowUp === true ? { browserFollowUp: true } : {}),
     sourceHash: b.sourceHash,
     coverageComplete: false,
     publication: "not-installed",
   };
 }
 
-module.exports = { assessCandidates };
+module.exports = { assessCandidates, failedIsolated };

@@ -5,6 +5,14 @@ const os = require("node:os");
 const path = require("node:path");
 const { createBroker } = require("../factory/discovery-broker.cjs");
 const { digest } = require("../factory/discovery-contract.cjs");
+const functional = require("../factory/discovery-functional.cjs");
+const charter = "functional-feed";
+const oracle = {
+  kind: "feed-pagination",
+  route: "/transactions/public",
+  authenticated: true,
+  query: { page: 2, limit: 5 },
+};
 test("broker reconnection cannot execute a fifth batch and a crashed batch stays consumed", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "discovery-restart-"));
   const source = path.join(root, "source"),
@@ -22,11 +30,12 @@ test("broker reconnection cannot execute a fifth batch and a crashed batch stays
     output: out,
     manifest: {},
     identity: { head: "a".repeat(40), grantId: "offline" },
+    charter,
     execute,
   };
   try {
     const first = createBroker(options);
-    await first.call("write_test", { file: "a.api.test.cjs", content: "// test" });
+    await first.call("write_test", { file: "a.api.test.cjs", oracle });
     for (let i = 0; i < 4; i++)
       await assert.rejects(
         createBroker(options).call("run_batch", { mode: "api", file: "a.api.test.cjs" })
@@ -46,38 +55,90 @@ test("model tools can read only the frozen source manifest and write only new te
   const output = path.join(root, "output");
   fs.mkdirSync(source);
   fs.mkdirSync(output);
-  fs.mkdirSync(path.join(source, "src"));
-  fs.writeFileSync(path.join(source, "src", "a.ts"), "export const a=1;");
+  const readable = "src/components/TransactionList.tsx";
+  fs.mkdirSync(path.join(source, "src", "components"), { recursive: true });
+  fs.writeFileSync(path.join(source, readable), "export const a=1;");
+  fs.writeFileSync(path.join(source, "src", "other.ts"), "outside scope");
   try {
     const broker = createBroker({
       root,
       source,
       output,
-      manifest: { "src/a.ts": digest("export const a=1;") },
+      manifest: {
+        [readable]: digest("export const a=1;"),
+        "src/other.ts": digest("outside scope"),
+      },
       identity: { head: "a".repeat(40), grantId: "x" },
+      charter,
       execute: async () => ({ code: 1, log: "assertion failed" }),
     });
-    assert.equal(
-      (await broker.call("read_source", { path: "src/a.ts" })).text,
-      "export const a=1;"
-    );
-    for (const file of ["../../.env", ".git/config", "/proc/self/environ"])
+    assert.equal((await broker.call("read_source", { path: readable })).text, "export const a=1;");
+    for (const file of ["../../.env", ".git/config", "/proc/self/environ", "src/other.ts"])
       await assert.rejects(broker.call("read_source", { path: file }));
     await assert.rejects(broker.call("write_test", { file: "backend/app.ts", content: "evil" }));
     await assert.rejects(broker.call("Bash", { command: "curl evil" }));
     await broker.call("write_test", {
       file: "a.api.test.cjs",
-      content: "require('node:assert').fail('example')",
+      oracle,
     });
     await broker.call("run_batch", { mode: "api", file: "a.api.test.cjs" });
     assert.equal(
       JSON.parse(fs.readFileSync(path.join(root, "batch-1.json"), "utf8")).testHash,
-      digest("require('node:assert').fail('example')")
+      digest(functional.proposal(charter, oracle))
     );
-    assert.equal(fs.readFileSync(path.join(source, "src", "a.ts"), "utf8"), "export const a=1;");
-    fs.writeFileSync(path.join(source, "src", "a.ts"), "changed");
-    await assert.rejects(broker.call("read_source", { path: "src/a.ts" }), /changed/);
+    assert.equal(fs.readFileSync(path.join(source, readable), "utf8"), "export const a=1;");
+    fs.writeFileSync(path.join(source, readable), "changed");
+    await assert.rejects(broker.call("read_source", { path: readable }), /changed/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Claude can compose a browser journey within the same four-batch budget", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "discovery-browser-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  fs.mkdirSync(source);
+  const journey = {
+    pages: ["feed", "notifications", "settings"],
+    check: "settings-validation",
+    variant: "invalid-email",
+  };
+  const executed = [];
+  const broker = createBroker({
+    root,
+    source,
+    output,
+    manifest: {},
+    identity: { head: "a".repeat(40), grantId: "offline" },
+    charter,
+    execute: async (request) => {
+      executed.push(request);
+      return { ...request, code: 0, networkIsolated: true };
+    },
+  });
+  await broker.call("write_browser_journey", { file: "settings.cy.ts", journey });
+  await assert.rejects(
+    broker.call("write_browser_journey", {
+      file: "foreign.cy.ts",
+      journey: { ...journey, pages: ["https://external.example", "settings"] },
+    })
+  );
+  await broker.call("write_test", { file: "feed.api.test.cjs", oracle });
+  await broker.call("run_batch", { mode: "api", file: "feed.api.test.cjs" });
+  for (let n = 0; n < 3; n++)
+    await broker.call("run_batch", { mode: "cypress", file: "settings.cy.ts" });
+  await assert.rejects(
+    broker.call("run_batch", { mode: "cypress", file: "settings.cy.ts" }),
+    /batch limit/
+  );
+  assert.deepEqual(
+    executed.map((r) => r.mode),
+    ["api", "cypress", "cypress", "cypress"]
+  );
+  const browserBatch = JSON.parse(fs.readFileSync(path.join(root, "batch-2.json"), "utf8"));
+  assert.doesNotThrow(() => functional.verifyFindings(charter, { findings: [] }, [browserBatch]));
+  browserBatch.test += "// replacement code";
+  assert.throws(() => functional.verifyFindings(charter, { findings: [] }, [browserBatch]));
 });
