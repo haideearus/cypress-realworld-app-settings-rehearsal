@@ -31,7 +31,7 @@ test("owner preview can inspect eligibility with discovery disabled and performs
         head_branch: "main",
         repository: { full_name: p.REPOSITORY },
         actor: { login: p.OWNER, id: 101267861 },
-        triggering_actor: { login: p.OWNER },
+        triggering_actor: { login: p.OWNER, id: 101267861 },
         event: "workflow_dispatch",
         status: "in_progress",
       };
@@ -120,9 +120,9 @@ test("scheduled finalization after the admission hour releases the existing gran
     origin: "discovery-sweep",
     phase: "discover",
     slot: "discovery",
-    discovery: { ...proof, charter: "feed" },
+    discovery: { ...proof, charter: "functional-feed" },
   };
-  request.discovery.key = d.sweepKey(head, "feed", proof.day);
+  request.discovery.key = d.sweepKey(head, "functional-feed", proof.day);
   const admitted = p.reserve(
     p.emptyState(p.REPOSITORY),
     request,
@@ -164,7 +164,7 @@ test("scheduled finalization after the admission hour releases the existing gran
         head_branch: "main",
         repository: { full_name: p.REPOSITORY },
         actor: { login: p.OWNER, id: 101267861 },
-        triggering_actor: { login: p.OWNER },
+        triggering_actor: { login: p.OWNER, id: 101267861 },
         event: "schedule",
         status: "in_progress",
       };
@@ -258,4 +258,194 @@ test("duplicate main-CI delivery cannot spend the second charter session", () =>
   });
   assert.equal(choice.ready, false);
   assert.match(choice.reason, /Duplicate main CI/);
+});
+
+test("factory App can run discovery only as the verified main CI actor", async () => {
+  const d = require("../factory/discovery-contract.cjs");
+  const { testedMain, verifyParent } = require("../factory/discovery-run.cjs");
+  const repo = { full_name: p.REPOSITORY };
+  const actor = { login: "haideearus-software-factory[bot]", id: 356310548, type: "Bot" };
+  const context = {
+    repository: p.REPOSITORY,
+    ref: "refs/heads/main",
+    workflowRef: d.WORKFLOW_REF,
+    workflowSha: head,
+    runId: "100",
+    runAttempt: 1,
+    actor: actor.login,
+    triggeringActor: actor.login,
+    event: "workflow_run",
+    phase: "discover",
+    slot: "discovery",
+  };
+  const parent = {
+    id: 100,
+    path: ".github/workflows/factory-discovery.yml",
+    head_branch: "main",
+    head_sha: head,
+    run_attempt: 1,
+    event: "workflow_run",
+    status: "in_progress",
+    repository: repo,
+    head_repository: repo,
+    actor: { ...actor },
+    triggering_actor: { ...actor },
+  };
+  const ci = {
+    ...parent,
+    id: 99,
+    path: ".github/workflows/factory-ci.yml",
+    event: "push",
+    status: "completed",
+    conclusion: "success",
+  };
+  const api = {
+    async request(method, url) {
+      assert.equal(method, "GET");
+      return url.endsWith("/branches/main") ? { commit: { sha: head } } : parent;
+    },
+    async pages(url) {
+      return url.includes("/jobs")
+        ? [{ name: "verify", head_sha: head, conclusion: "success" }]
+        : [ci];
+    },
+  };
+  assert.equal(d.contextOK(context), true);
+  await verifyParent(api, context);
+  assert.equal((await testedMain(api, context, { workflow_run: ci })).ciRunId, "99");
+  assert.equal(d.contextOK({ ...context, event: "workflow_dispatch" }), false);
+  parent.triggering_actor.id = 123;
+  await assert.rejects(verifyParent(api, context), /identity/i);
+  parent.triggering_actor.id = actor.id;
+  ci.head_repository = { full_name: "other/fork" };
+  await assert.rejects(testedMain(api, context, { workflow_run: ci }), /identity|CI/i);
+  ci.head_repository = repo;
+  ci.triggering_actor = { ...actor, id: 123 };
+  await assert.rejects(testedMain(api, context, { workflow_run: ci }), /identity|CI/i);
+  ci.triggering_actor = actor;
+  await assert.rejects(testedMain(api, context, { workflow_run: { id: 98 } }), /stale/i);
+
+  // Finding intake rechecks the newest successful main CI without rebinding the
+  // original discovery trigger. The current CI may now be owner-authored.
+  ci.actor = ci.triggering_actor = { login: p.OWNER, id: 101267861 };
+  const currentMain = await testedMain(api, { ...context, event: "workflow_dispatch" }, {});
+  assert.equal(currentMain.ciRunId, "99");
+});
+
+test("a second sweep on a newer main head rotates to the other functional charter", () => {
+  const d = require("../factory/discovery-contract.cjs");
+  const day = "2026-11-20";
+  const next = "f".repeat(40);
+  const state = p.emptyState(p.REPOSITORY);
+  const registry = emptyDiscovery();
+  const config = { ...p.readConfig(vars), discovery: true };
+  const first = selectSweep({ state, registry, head, day, config });
+  state.tickets["8"] = { discovery: { charter: first.charter } };
+  state.grants.used = {
+    ticket: 8,
+    phase: "discover",
+    at: "2026-11-20T07:30:00.000Z",
+    status: "finished",
+  };
+  registry.sources[d.sweepKey(head, first.charter, day)] = {
+    status: "created",
+    proof: { head, charter: first.charter, day },
+  };
+  const second = selectSweep({ state, registry, head: next, day, config });
+  assert.equal(second.ready, true);
+  assert.notEqual(second.charter, first.charter);
+});
+
+test("a delayed Bucharest schedule reaches the usual metered admission and releases no extra budget", async (t) => {
+  const d = require("../factory/discovery-contract.cjs");
+  const now = new Date("2026-11-22T06:39:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const env = {
+    GITHUB_REPOSITORY: p.REPOSITORY,
+    GITHUB_ACTOR: p.OWNER,
+    GITHUB_TRIGGERING_ACTOR: p.OWNER,
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_WORKFLOW_REF: d.WORKFLOW_REF,
+    GITHUB_WORKFLOW_SHA: head,
+    GITHUB_RUN_ID: "100",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_EVENT_NAME: "schedule",
+    FACTORY_VARIABLES: JSON.stringify({
+      ...vars,
+      FACTORY_DISCOVERY_ENABLED: "true",
+      FACTORY_AUTOMATION_ENABLED: "true",
+      FACTORY_GITHUB_APP_CLIENT_ID: "Iv1.fixture123456",
+      FACTORY_GITHUB_APP_SLUG: "fixture-factory",
+    }),
+  };
+  const api = {
+    async request(method, path, body) {
+      if (method === "POST") {
+        assert.ok(path.endsWith("/issues"));
+        return {
+          ...body,
+          number: 151,
+          state: "open",
+          user: { login: "github-actions[bot]", id: 41898282 },
+        };
+      }
+      assert.equal(method, "GET");
+      if (path.endsWith("/branches/main")) return { commit: { sha: head } };
+      assert.ok(path.endsWith("/actions/runs/100"));
+      return {
+        id: 100,
+        run_attempt: 1,
+        path: ".github/workflows/factory-discovery.yml",
+        head_sha: head,
+        head_branch: "main",
+        repository: { full_name: p.REPOSITORY },
+        actor: { login: p.OWNER, id: 101267861 },
+        triggering_actor: { login: p.OWNER, id: 101267861 },
+        event: "schedule",
+        status: "in_progress",
+      };
+    },
+    async pages(path) {
+      if (path.includes("/workflows/factory-ci.yml/"))
+        return [
+          {
+            id: 99,
+            head_sha: head,
+            head_branch: "main",
+            event: "push",
+            path: ".github/workflows/factory-ci.yml",
+            status: "completed",
+            conclusion: "success",
+            repository: { full_name: p.REPOSITORY },
+            run_attempt: 1,
+          },
+        ];
+      if (path.includes("/actions/runs/99/"))
+        return [{ name: "verify", head_sha: head, conclusion: "success" }];
+      assert.ok(path.includes("/issues?state=open&labels=factory-ready"));
+      return [];
+    },
+  };
+  let state = p.emptyState(p.REPOSITORY);
+  const ledger = {
+    async read() {
+      return { state };
+    },
+    async update(fn) {
+      const r = fn(state);
+      state = r.state;
+      return r;
+    },
+  };
+  const result = await require("../factory/discovery-run.cjs").main(env, {
+    api,
+    ledger,
+    store: registry(),
+    now,
+  });
+  assert.equal(result?.grant?.phase, "discover");
+  assert.equal(result.grant.ticket, 151);
+  assert.equal(result.grant.at, "2026-11-22T06:39:00.000Z");
+  assert.deepEqual(state.days["2026-11-22"], [151]);
+  assert.equal(Object.keys(state.grants).length, 1);
 });

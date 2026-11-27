@@ -14,6 +14,19 @@ const cfg = policy.readConfig({
   FACTORY_GITHUB_APP_CLIENT_ID: "Iv123456789",
   FACTORY_GITHUB_APP_SLUG: "factory-example",
 });
+
+test("dependency refusal logs explain a known stale base without exposing arbitrary errors", () => {
+  const { refusalReason } = require("../factory/dependency-run.cjs");
+  assert.match(
+    refusalReason(Error("Dependency PR requires a current-main rebase")),
+    /requires a current-main rebase/
+  );
+  assert.match(
+    refusalReason(Error("Native review gate is pending or unavailable")),
+    /Native review gate is pending/
+  );
+  assert.doesNotMatch(refusalReason(Error("private response body")), /private response body/);
+});
 function pr() {
   return {
     number: 52,
@@ -177,13 +190,52 @@ test("terminal metadata-only preparation can be finalized without resetting its 
   assert.equal(s.tickets["52"].status, "blocked");
   assert.equal(Object.values(s.days).flat().length, 1);
 });
+test("a refreshed PR can recover an old terminal bot preparation using its bound receipt", async (t) => {
+  const x = await fixture();
+  await x.coordinator.select(false);
+  const oldHead = x.f.rows[0].head.sha;
+  x.f.rows[0].head.sha = "c".repeat(40);
+  const bot = { login: "github-actions[bot]", id: 41898282 };
+  x.f.route = (path) =>
+    path === "/actions/runs/100/attempts/1"
+      ? {
+          id: 100,
+          path: ".github/workflows/factory-dependencies.yml",
+          repository: { full_name: policy.REPOSITORY },
+          head_repository: { full_name: policy.REPOSITORY },
+          head_sha: head,
+          head_branch: "main",
+          event: "workflow_dispatch",
+          actor: bot,
+          triggering_actor: bot,
+          run_attempt: 1,
+          status: "completed",
+        }
+      : undefined;
+  const trusted = require("../factory/trusted-wake.cjs");
+  const verify = t.mock.method(trusted, "verifyPreparationOrigin", async (_api, run, ticket, a) => {
+    assert.equal(run.id, 100);
+    assert.equal(ticket.pr, 52);
+    assert.equal(a.head, oldHead);
+    return true;
+  });
+  const later = new DependencyCoordinator(x.api, cfg, { ...ctx, runId: "101" });
+  assert.equal((await later.select(false)).head, x.f.rows[0].head.sha);
+  assert.equal(verify.mock.callCount(), 1);
+  const state = (await x.ledger.read()).state;
+  assert.deepEqual(
+    state.tickets[52].dependency.attempts.map((attempt) => attempt.head),
+    [oldHead, x.f.rows[0].head.sha]
+  );
+  assert.equal(Object.keys(state.grants).length, 0);
+});
 test("dependency merge cannot use ordinary owner context or bypass its dedicated provenance", async () => {
   const x = await fixture();
   const merger = new DependencyMerger(x.api, cfg, context, null);
   await assert.rejects(merger.merge(52), /context|Unauthorized/i);
 });
 
-const report = (stage = "analysis", now = new Date()) =>
+const report = (stage = "analysis", now = new Date(), runId = "100") =>
   reportFor(
     {
       repository: policy.REPOSITORY,
@@ -191,7 +243,7 @@ const report = (stage = "analysis", now = new Date()) =>
       base: head,
       head: pr().head.sha,
       workflowSha: head,
-      runId: "100",
+      runId,
       runAttempt: 1,
       stage,
       toolDigest: toolDigest(),
@@ -208,6 +260,7 @@ async function reviewSession(x) {
           display_title: "Factory CI / 11111111-1111-4111-8111-111111111111",
           event: "workflow_dispatch",
           path: ".github/workflows/factory-ci.yml",
+          run_attempt: 1,
           status: "completed",
           conclusion: "success",
         }
@@ -225,7 +278,27 @@ async function reviewSession(x) {
     };
     return { state: s };
   });
-  const g = await x.coordinator.reserve(52);
+  const packet = {
+    version: 2,
+    base: pr().base.sha,
+    head: pr().head.sha,
+    checkedAt: new Date().toISOString(),
+    ciEvidence: { status: "verified", runId: 9, runAttempt: 1, head: pr().head.sha },
+  };
+  await assert.rejects(x.coordinator.reserve(52, packet), /evidence/);
+  await x.ledger.update((state) => {
+    state.tickets["52"].dependency.attempts[0].evidence = [
+      {
+        at: packet.checkedAt,
+        finishedAt: packet.checkedAt,
+        status: "ready",
+        digest: require("../factory/dependency-contract.cjs").digest(packet),
+      },
+    ];
+    return { state };
+  });
+  await assert.rejects(x.coordinator.reserve(52, { ...packet, injected: true }), /evidence/);
+  const g = await x.coordinator.reserve(52, packet);
   return {
     grantId: g.grantId,
     bundle: {
@@ -517,6 +590,241 @@ test("analysis, CI, one readonly review and native protected merge complete with
   assert.equal(s.tickets["52"].coding, 0);
   assert.equal(s.tickets["52"].reviews, 1);
   assert.equal(s.tickets["52"].merge.status, "merged");
+});
+
+function failFinalCheck(x, runContext, error) {
+  const merger = new DependencyMerger(
+    x.api,
+    cfg,
+    runContext,
+    report("premerge", new Date(), runContext.runId)
+  );
+  const checks = merger.checks.bind(merger);
+  let reads = 0;
+  merger.checks = (...args) => {
+    if (++reads === 2) throw error;
+    return checks(...args);
+  };
+  return merger.merge(52);
+}
+
+function retryProducer(x) {
+  const prior = x.f.route;
+  x.f.route = (p, ...args) => {
+    if (p === "/actions/runs/101")
+      return {
+        id: 101,
+        path: ".github/workflows/factory-dependencies.yml",
+        repository: { full_name: policy.REPOSITORY },
+        head_repository: { full_name: policy.REPOSITORY },
+        head_sha: head,
+        head_branch: "main",
+        event: "schedule",
+        actor: { login: policy.OWNER },
+        triggering_actor: { login: policy.OWNER },
+        run_attempt: 1,
+        status: "in_progress",
+      };
+    if (p === "/actions/runs/101/jobs")
+      return {
+        jobs: [{ name: "premerge", run_id: 101, status: "completed", conclusion: "success" }],
+      };
+    if (p === "/actions/runs/101/artifacts")
+      return {
+        artifacts: [
+          {
+            id: 24,
+            name: `dependency-premerge-101-1-52-${pr().head.sha}`,
+            expired: false,
+            size_in_bytes: 500,
+            workflow_run: { id: 101, head_sha: head },
+          },
+        ],
+      };
+    return prior(p, ...args);
+  };
+}
+
+test("a confirmed unsent GitHub read failure claims one delayed merge-only retry and retains its approval", async () => {
+  const x = await protectedMergeFixture();
+  const original = (await x.ledger.read()).state;
+  const error = Object.assign(Error("GitHub request failed (503)"), { status: 503, method: "GET" });
+  await assert.rejects(failFinalCheck(x, ctx, error), /503/);
+  const first = (await x.ledger.read()).state;
+  const t = first.tickets["52"];
+  assert.equal(t.dependencyMergeRetry.phase, "queued");
+  assert.equal(t.dependencyMergeRetry.failure.stage, "required-checks");
+  assert.equal(first.active, null);
+  assert.equal(t.merge, undefined);
+  assert.deepEqual(t.approval, original.tickets["52"].approval);
+  assert.deepEqual(t.ci, original.tickets["52"].ci);
+  assert.deepEqual(first.grants, original.grants);
+  const laterContext = { ...ctx, runId: "101" };
+  const later = new DependencyCoordinator(x.api, cfg, laterContext);
+  assert.equal((await later.select(false, new Date(t.dependencyMergeRetry.at))).ready, false);
+
+  const due = new Date(t.dependencyMergeRetry.retryAt);
+  const picks = await Promise.all([later.select(false, due), later.select(false, due)]);
+  assert.equal(picks.filter((p) => p.ready).length, 1);
+  assert.equal(picks.find((p) => p.ready).mode, "merge");
+  retryProducer(x);
+  await assert.rejects(failFinalCheck(x, laterContext, error), /503/);
+  const exhausted = (await x.ledger.read()).state;
+  assert.equal(exhausted.tickets["52"].dependencyMergeRetry.phase, "held");
+  assert.equal(exhausted.active, null);
+  assert.deepEqual(exhausted.grants, original.grants);
+  assert.equal(x.f.puts || 0, 0);
+  assert.equal((await later.select(false, due)).ready, false);
+  const admission = require("../factory/dependency-policy.cjs");
+  const other = pr();
+  other.number = 53;
+  assert.equal(
+    admission.claimDependency(exhausted, other, { ...ctx, runId: "102" }, cfg).active.ticket,
+    53
+  );
+});
+
+test("a claimed retry can merge with the same CI and review after all checks pass", async () => {
+  const x = await protectedMergeFixture();
+  const error = Object.assign(Error("GitHub request failed (503)"), { status: 503, method: "GET" });
+  await assert.rejects(failFinalCheck(x, ctx, error), /503/);
+  const before = (await x.ledger.read()).state;
+  const due = new Date(before.tickets["52"].dependencyMergeRetry.retryAt);
+  const run = { ...ctx, runId: "101" };
+  const coordinator = new DependencyCoordinator(x.api, cfg, run);
+  assert.equal((await coordinator.select(false, due)).mode, "merge");
+  retryProducer(x);
+  const result = await new DependencyMerger(
+    x.api,
+    cfg,
+    run,
+    report("premerge", new Date(), run.runId)
+  ).merge(52);
+  assert.equal(result.merged, true);
+  assert.equal(x.f.puts, 1);
+  const after = (await x.ledger.read()).state;
+  assert.deepEqual(after.grants, before.grants);
+  assert.deepEqual(after.tickets["52"].ci, before.tickets["52"].ci);
+  assert.equal(after.tickets["52"].merge.status, "merged");
+});
+
+test("a final check identity failure holds only its PR and provides a safe diagnostic", async () => {
+  const x = await protectedMergeFixture();
+  const error = Error("Missing native required check: verify");
+  await assert.rejects(failFinalCheck(x, ctx, error), (reported) => {
+    const { refusalReason } = require("../factory/dependency-run.cjs");
+    assert.match(
+      refusalReason(reported),
+      /required.checks.*Missing native required check: verify/i
+    );
+    return true;
+  });
+  const state = (await x.ledger.read()).state;
+  assert.equal(state.tickets["52"].dependencyMergeRetry.phase, "held");
+  assert.equal(state.tickets["52"].approval.verdict, "pass");
+  assert.equal(x.f.puts || 0, 0);
+});
+
+test("a verified GitHub read failure in the initial merge checks also schedules a safe retry", async () => {
+  const x = await protectedMergeFixture();
+  const merger = new DependencyMerger(x.api, cfg, ctx, report("premerge"));
+  merger.checks = async () => {
+    throw Object.assign(Error("GitHub request failed (502)"), { status: 502, method: "GET" });
+  };
+  await assert.rejects(merger.merge(52), /502/);
+  const s = (await x.ledger.read()).state;
+  assert.equal(s.tickets["52"].dependencyMergeRetry.phase, "queued");
+  assert.equal(s.tickets["52"].merge, undefined);
+  assert.equal(s.tickets["52"].reviews, 1);
+  assert.equal(x.f.puts || 0, 0);
+});
+
+test("a retry that ends in premerge releases its queue hold without a new review", async () => {
+  const x = await protectedMergeFixture();
+  const failure = Object.assign(Error("GitHub request failed (503)"), {
+    status: 503,
+    method: "GET",
+  });
+  await assert.rejects(failFinalCheck(x, ctx, failure), /503/);
+  const queued = (await x.ledger.read()).state.tickets["52"].dependencyMergeRetry;
+  const later = new DependencyCoordinator(x.api, cfg, { ...ctx, runId: "101" });
+  const due = new Date(queued.retryAt);
+  assert.equal((await later.select(false, due)).ready, true);
+  await later.finalize(52);
+  const s = (await x.ledger.read()).state;
+  assert.equal(s.tickets["52"].dependencyMergeRetry.phase, "held");
+  assert.equal(s.tickets["52"].approval.verdict, "pass");
+  assert.equal(s.tickets["52"].reviews, 1);
+  assert.equal(s.tickets["52"].merge, undefined);
+  assert.equal((await later.select(false, due)).ready, false);
+});
+
+test("a matching failed premerge report transfers an authenticated read failure to the retry ledger", async () => {
+  const x = await protectedMergeFixture();
+  const retry = require("../factory/dependency-merge-retry.cjs");
+  const error = Object.assign(Error("GitHub request failed (503)"), { status: 503, method: "GET" });
+  const premergeEvidence = JSON.stringify(retry.premergeEvidence(error));
+  const outcome = { premergeFailed: true, premergeEvidence, head: "c".repeat(40) };
+  await x.coordinator.finalize(52, outcome);
+  assert.equal((await x.ledger.read()).state.tickets["52"].dependencyMergeRetry, undefined);
+  await x.coordinator.finalize(52, { ...outcome, head: pr().head.sha });
+  const t = (await x.ledger.read()).state.tickets["52"];
+  assert.equal(t.dependencyMergeRetry.phase, "queued");
+  assert.deepEqual(t.dependencyMergeRetry.failure, {
+    stage: "premerge",
+    reason: "GitHub read failed (503)",
+  });
+  assert.equal(t.approval.verdict, "pass");
+});
+
+test("a quota retry waits for an authenticated reset and permission denials do not retry", () => {
+  const { premergeEvidence } = require("../factory/dependency-merge-retry.cjs");
+  const now = new Date("2026-11-25T12:00:00.000Z");
+  const denied = Object.assign(Error("GitHub request failed (403)"), {
+    status: 403,
+    method: "GET",
+  });
+  assert.equal(premergeEvidence(denied, now).retryAt, null);
+  denied.quotaResetAt = +now + 20 * 60_000;
+  assert.equal(premergeEvidence(denied, now).retryAt, "2026-11-25T12:20:00.000Z");
+  denied.method = "PUT";
+  assert.equal(premergeEvidence(denied, now).retryAt, null);
+});
+
+test("an uncertain send during a claimed retry keeps its intent through finalization", async () => {
+  const x = await protectedMergeFixture();
+  const failure = Object.assign(Error("GitHub request failed (503)"), {
+    status: 503,
+    method: "GET",
+  });
+  await assert.rejects(failFinalCheck(x, ctx, failure), /503/);
+  const queued = (await x.ledger.read()).state.tickets["52"].dependencyMergeRetry;
+  const run = { ...ctx, runId: "101" };
+  const later = new DependencyCoordinator(x.api, cfg, run);
+  const due = new Date(queued.retryAt);
+  await later.select(false, due);
+  retryProducer(x);
+  const previous = x.f.route;
+  x.f.route = (p, method, ...args) => {
+    if (p === "/pulls/52/merge" && method === "PUT") {
+      x.f.puts = (x.f.puts || 0) + 1;
+      throw Error("fixture transport lost the response");
+    }
+    return previous(p, method, ...args);
+  };
+  const merger = new DependencyMerger(x.api, cfg, run, report("premerge", new Date(), "101"), {
+    sleep: async () => {},
+    maxPolls: 1,
+  });
+  assert.equal((await merger.merge(52)).pending, true);
+  const before = await x.ledger.read();
+  await later.finalize(52);
+  assert.deepEqual(await x.ledger.read(), before);
+  assert.equal(before.state.tickets["52"].merge.status, "intent");
+  assert.equal(x.f.puts, 1);
+
+  const retry = require("../factory/dependency-merge-retry.cjs");
+  assert.equal(retry.permits(before.state.tickets["52"], run, new Date(+due + 26 * 60_000)), false);
 });
 
 test("dependency confirmation tolerates advanced main while matching PR closure is delayed", async () => {
@@ -822,9 +1130,35 @@ test("workflow preserves preview, trusted source, readonly model and isolated cr
     yaml.load(fs.readFileSync(path.resolve(__dirname, "../../.github/" + name), "utf8"));
   const w = file("workflows/factory-dependencies.yml");
   assert.equal(w.on.workflow_dispatch.inputs.preview.default, true);
-  assert.match(w.jobs.select.if, /inputs.preview/);
+  assert.match(w.jobs.preview.if, /workflow_dispatch.*&& inputs.preview/);
+  assert.match(w.jobs.select.if, /github\.event_name == 'workflow_dispatch' && !inputs\.preview/);
+  assert.deepEqual(w.jobs.preview.permissions, {
+    contents: "read",
+    issues: "read",
+    "pull-requests": "read",
+    actions: "read",
+  });
+  assert.equal(w.jobs.select.permissions.issues, "write");
+  assert.ok(w.jobs.preview.steps.some((step) => step.with?.operation === "dep_track"));
+  const track = w.jobs.select.steps.find((step) => step.env?.FACTORY_OPERATION === "dep_track");
+  assert.equal(track.run, "node scripts/factory/dependency-run.cjs");
+  assert.equal(
+    track.env.FACTORY_DEPENDABOT_REBASE_TOKEN,
+    "${{ secrets.FACTORY_DEPENDABOT_REBASE_TOKEN }}"
+  );
+  assert.doesNotMatch(JSON.stringify(w.jobs.select.steps.filter((s) => s !== track)), /secrets\./);
+  const afterMerge = w.jobs.track_after_merge;
+  assert.deepEqual(afterMerge.needs, ["select", "merge", "finalize"]);
+  assert.match(afterMerge.if, /always\(\).*needs\.merge\.outputs\.merged == 'true'/);
+  assert.equal(afterMerge.concurrency.group, "factory-ledger");
+  assert.deepEqual(afterMerge.permissions, w.jobs.select.permissions);
+  assert.deepEqual(afterMerge.steps.at(-1).env, {
+    ...track.env,
+    FACTORY_OPERATION: "dep_recover_tracked",
+  });
+  assert.doesNotMatch(JSON.stringify(afterMerge), /CLAUDE|APP_PRIVATE_KEY/);
   for (const [name, job] of Object.entries(w.jobs)) {
-    if (name !== "select" && name !== "finalize") {
+    if (name !== "preview" && name !== "finalize") {
       assert.match(job.if, /FACTORY_ENABLED/);
       assert.match(job.if, /FACTORY_AUTOMATION_ENABLED/);
     }
@@ -832,12 +1166,22 @@ test("workflow preserves preview, trusted source, readonly model and isolated cr
       if (step.uses?.startsWith("actions/checkout@"))
         assert.equal(step.with.ref, "${{ github.workflow_sha }}");
   }
-  for (const name of ["analysis", "premerge", "ci", "select", "reserve", "assess", "finalize"])
+  for (const name of [
+    "analysis",
+    "premerge",
+    "ci",
+    "preview",
+    "evidence",
+    "reserve",
+    "assess",
+    "finalize",
+  ])
     assert.doesNotMatch(JSON.stringify(w.jobs[name]), /secrets\./);
   assert.equal(w.jobs.review.with.phase, "review");
   assert.equal(w.jobs.review.with.slot, "dependency");
   assert.deepEqual(w.jobs.assess.permissions, {
     contents: "write",
+    issues: "read",
     "pull-requests": "read",
     actions: "read",
     checks: "write",
@@ -882,4 +1226,33 @@ test("placeholder dependency review leaves the used reservation and gate untouch
   await assert.rejects(x.coordinator.assess(52, grantId, bundle), /review|placeholder/i);
   assert.deepEqual(await x.ledger.read(), before);
   assert.equal(x.f.publicationStates.length, 0);
+});
+
+test("a stale reviewed native head releases its terminal lease without using a new review", async () => {
+  const x = await reviewedV2();
+  const before = (await x.ledger.read()).state;
+  const route = x.f.route;
+  x.f.rows[0].base.sha = "e".repeat(40);
+  x.f.route = (p, ...args) =>
+    p === "/git/ref/heads/main"
+      ? { object: { sha: x.f.rows[0].base.sha } }
+      : p.startsWith("/compare/")
+        ? { behind_by: 1, merge_base_commit: { sha: head } }
+        : route(p, ...args);
+  const observer = new DependencyCoordinator(x.api, x.config, { ...ctx, runId: "200" });
+  assert.equal((await observer.select(false)).ready, false);
+  assert.deepEqual((await x.ledger.read()).state, before);
+  x.f.terminal = true;
+  assert.equal((await observer.select(false)).ready, false);
+  const after = (await x.ledger.read()).state;
+  assert.equal(after.tickets["52"].status, "blocked");
+  assert.equal(after.tickets["52"].approval, null);
+  assert.deepEqual(after.activeTickets, {});
+  assert.deepEqual(after.days, before.days);
+  assert.deepEqual(after.grants, before.grants);
+  assert.deepEqual(
+    after.tickets["52"].dependency.attempts,
+    before.tickets["52"].dependency.attempts
+  );
+  assert.equal(after.tickets["52"].reviews, before.tickets["52"].reviews);
 });

@@ -16,16 +16,143 @@ Earlier PR #52 analysis/review holds remain historical evidence. The retained-ve
 [verification record](retained-advisory-fix-verification-2026-11-15.md).
 No extended scheduled-operation acceptance is claimed by that controlled run.
 
+## Turn Dependabot alerts into repair tickets
+
+**Dependabot alert intake** compares open alerts with the root Yarn lockfile on
+`main`. The manual `preview` operation ranks package groups by severity, then
+runtime exposure, and evaluates up to ten.
+Public job logs and summaries show aggregate counts.
+Each compatible candidate satisfies the existing version selectors and is
+outside the affected ranges in the reviewed advisory catalog. A hold may require
+updating a parent or a direct pin, reviewing unavailable evidence, or fixing
+separate release lines individually. Candidate versions still need the existing
+lockfile analysis, CI, independent review and branch protection before merge.
+
+The GitHub App needs **Dependabot alerts: Read-only** on this repository. The
+preview creates no tickets or PRs and uses no Claude sessions.
+
+After the App permission and a hosted preview are verified, a separately
+enabled run can prepare a repair. Set
+`FACTORY_DEPENDENCY_ALERT_REPAIR_ENABLED=true` to opt in. The main factory
+and automatic pickup switches must also be on. Intake checks at minutes 07
+and 37 of each hour. It gives eligible app work and current native Dependabot
+PRs priority, prepares one proposal at a time, and keeps a limit of ten new
+preparations per Bucharest day plus the shared maintenance admission budget.
+
+The workflow creates a ticket and an App-authored lockfile PR and applies
+`factory-dependency-ready` after recording their exact identities. The normal
+hourly **Dependency maintenance** workflow revalidates the ticket and PR, then
+runs dependency analysis, CI, and one independent Claude Pro review through
+the existing ledger. Both required checks and the existing merging switch
+govern merge. Production deployment retains its approval gate.
+
+Intake first tries an in-range lockfile update with unchanged dependency edges.
+For an existing held issue, it can then evaluate a wider upgrade. It preserves
+attempts when refreshing the same PR against a newer `main` and honors removal
+of the ready label. It records a publication intent before creating a ticket or
+PR and verifies a matching GitHub object to recover a lost response. It closes
+a ticket after the protected merge is recorded, the patched lock entries are on
+`main`, and GitHub reports no open alerts for the package.
+
+### Held vulnerability tickets
+
+When a reviewed compatible proposal is unavailable, intake can create one
+`factory-dependency-held` issue for the package in the root lockfile. Its
+status explains whether an updated parent or direct pin, a larger upgrade,
+fresh registry data, or complete advisory evidence is needed. Intake can
+reconsider the package on later scans and route the same issue through the
+existing protected dependency workflow once a compatible candidate is verified.
+The promoted issue links to its repair PR. An upgrade merged outside this path
+has no matching publication receipt. Verify the fix and close the held issue
+with evidence if that separate upgrade clears it. The held label alone cannot
+authorize a repair, review or merge.
+
+For a tracked hold with compatible registry candidates, intake tries up to four
+versions in ascending order. It moves past a confirmed graph restriction or
+advisory rejection only after a fresh check. A registry or advisory outage holds
+the proposal. The chosen release must satisfy the existing selectors, preserve
+the dependency graph and clear the advisory checks across affected lockfile copies.
+
+The existing issue records the latest confirmed blocker. When more versions are
+available, the next intake continues from the saved candidate position. After
+exhausting the list, intake skips duplicate preparation until the dependency files,
+candidate releases, or advisory evidence change. A weekly recheck covers updates
+reported only by the independent advisory service. Removing the held label pauses
+promotion. The issue keeps its identity and history when a candidate passes.
+
+After an in-range check is exhausted or no common candidate fits, intake can
+search for separate patched versions for different selectors. It can also try
+upgrades to existing direct packages that introduce the vulnerable dependency,
+including a major version step, or remove the vulnerable version when a new
+parent release drops the dependency. It uses fixed public npm endpoints and
+builds the manifest and Yarn lockfile from metadata. Preparation executes no
+package code or lifecycle scripts.
+
+A wider proposal can edit up to four existing direct dependency ranges and
+the affected lockfile graph. It preserves root dependency names and manifest
+configuration. Unsupported sources, missing patches, changes that need app code
+edits, and incomplete evidence can still leave the issue held. The original issue
+keeps the latest blocker, with recent search results retained in the registry
+and earlier results in its commit history. Unchanged unsuccessful searches back
+off for a day. Unavailable evidence gets one earlier retry after 30 minutes.
+
+The exact candidate files are bound to the existing App-authored PR receipt, and
+only that path accepts wider changes. Candidate CI, independent Claude Pro
+review, native required checks and protected merge are still required. A bot
+event can request pickup only for a matching trusted green CI receipt. A later
+intake confirms automatic closure after the merge and alert clearance.
+
+### Reserved turns for held dependencies
+
+Intake reads one alert snapshot and has separate scan positions for new alerts
+and held tickets. When both queues have work, intake gives held tickets priority
+until it has prepared three held proposals that day. One new critical runtime
+alert can take an earlier turn. The existing app work priority, daily limits
+and one-publication limit still apply.
+
+Held tickets are ordered by severity, runtime exposure and time waiting.
+A bounded scan moves past paused tickets and incomplete evidence so those
+records cannot block later held tickets. Intake keeps the original ticket and
+records prepared, merged and GitHub-cleared repairs separately. It targets two
+completed held repairs when candidates and capacity are available. The automatic
+merge path authorizes at most four held merges per Bucharest day. Alert
+reconciliation can finish after the cap is reached. Availability of compatible
+releases, review capacity and GitHub scheduling determine how many repairs can
+finish in a day.
+
+### Event-driven dependency handoff
+
+Successful push CI for the exact current main commit can wake **Dependabot
+alert intake** when event pickup is enabled. Alert intake checks the CI producer
+and its verification job before refreshing the existing proposal. It can
+continue on its existing schedule if GitHub misses the event.
+
+When intake defers held work because the factory slot is occupied, it can
+resume once after the matching trusted workflow finishes and releases the slot.
+Intake checks the current main commit, the saved queue, and the usage ledger
+before consuming that receipt. Unrelated completions skip dependency analysis
+and App token creation.
+
+When PR CI succeeds for the refreshed head, **Factory event wake** revalidates
+the configured GitHub App and the exact ready alert ticket, PR and head in
+the durable registry. A valid event can start **Dependency maintenance**
+through the same receipt mechanism as a native Dependabot PR. Existing CI,
+independent review, budgets and protected merge requirements still apply.
+
 ## What happens
 
-Dependabot proposes changes to the application's library versions. The dependency
-workflow selects only genuine `dependabot[bot]` PRs in this repository against
-`main`. No `factory-ready` label is needed for this lane. App repair tickets still
-use their existing label and coding workflow.
+Dependabot proposes changes to the application's library versions. The native
+lane requires a genuine `dependabot[bot]` PR in this repository against `main`.
+The workflow creates one `factory-dependency-ready` tracking issue for each
+native PR. It preserves that link across head updates and records whether the
+PR merged or closed. Native PR eligibility remains governed by verified
+Dependabot provenance, CI, independent review and branch protection. App
+repair issues use `factory-ready` and their existing coding workflow.
 
 ```text
 Dependabot PR -> metadata admission -> version/source/OSV checks -> exact-head CI
-             -> read-only Claude Pro review -> fresh version/source/OSV checks
+             -> scanned public evidence -> reserve and run read-only Claude Pro review
+             -> fresh version/source/OSV checks
              -> native required checks -> protected merge
              -> named human deployment approval -> existing Render/live checks
 ```
@@ -52,6 +179,19 @@ authorized merge-only recovery must still pass fresh analysis, both native
 required checks, clean mergeability, limits and stop checks. Publication alone
 does not prove merge or authorize deployment.
 
+When the merger reruns the native review gate, it waits for the commit check and
+the job for that exact new workflow attempt to agree. It uses the same bounded
+wait for the final verification before sending the merge request.
+
+If a dependency merge stops before it sends GitHub a merge request, the ledger
+records the failed check and a safe reason. A confirmed temporary GitHub read
+failure can queue one merge-only retry for a later workflow, after at least five
+minutes and any verified quota reset. The retry uses the existing CI and review
+for the same head and base and performs the normal merge checks again. A failed
+or expired retry leaves the approval and counters intact and lets unrelated
+work proceed. An uncertain merge request still requires confirmation before
+another send.
+
 ## Limits and holds
 
 - Native version proposals: Monday 06:15, Europe/Bucharest; one open version PR.
@@ -67,12 +207,16 @@ does not prove merge or authorize deployment.
 - A dependency PR has zero coding attempts/retries. Each distinct head gets at
   most one review attempt, capped at ten lifetime heads and the configured review
   limit. New bot commits preserve its admission and lifetime counters. A failed
-  head is never automatically retried. The existing turn and timeout caps apply.
+  model review is never automatically retried on the same head. The evidence
+  check can retry once without reserving a model. The existing turn and timeout
+  caps apply.
 - Only modified root `package.json` and `yarn.lock` are accepted. Stable patch and
   minor updates and supported transitive fixes are eligible. Major upgrades,
   downgrades, changed dependency names/sections, scripts/configuration, unsupported
-  sources, prereleases and ambiguous graph transitions are held. The ordinary app
-  merger still cannot merge dependency files.
+  sources, prereleases and ambiguous graph transitions are held under ordinary
+  dependency policy. A wider alert proposal has a separate, receipt-bound
+  policy for verified stable upgrades. The ordinary app merger still cannot merge
+  dependency files.
 - OSV checks cover removed versions and every resulting version of affected
   package names. Added versions and existing versions selected by changed root or
   dependency paths are blocking candidates. Reused paths are followed recursively
@@ -180,8 +324,8 @@ The fixture suite simulates GitHub/OSV/model results; it is not a live Claude tr
 
 ## Current facts supplied to the reviewer
 
-Before the dependency model session, trusted code reads `package.json` and
-`yarn.lock` from the reserved immutable base/head commits. It fetches each resulting
+After exact-head CI and before reserving Claude, trusted code in the `evidence` job
+reads `package.json` and `yarn.lock` from the immutable base and head. It fetches each resulting
 affected version's npm registry record, including retained/baseline copies, and
 matches the package name, version, canonical
 tarball, integrity, and any lock URL SHA-1 fragment. A fresh OSV batch maps advisory
@@ -191,7 +335,10 @@ The packet records its
 observation time, exact commits, changed dependency files, source URLs and the
 separate cleared/remaining-baseline summary.
 
-The reviewer receives these facts in `.factory-input/context.json`. A separate
+The factory scans the packet before handing it to the reservation job. The reservation
+and reviewer both check the digest retained in the active attempt, the exact CI run,
+the base and head, and a 15-minute age limit. The reviewer receives these facts in
+`.factory-input/context.json`. A separate
 `dependency-facts-<grant>` artifact retains the same scanned packet for seven days.
 It is evidence, not an approval or a replacement for CI, independent review,
 fresh premerge checks or native branch protection. Unchanged historical documents
@@ -199,21 +346,54 @@ are context; they cannot authorize approval of a newer head. Registry existence
 and matching checksums do not establish publisher trust, API compatibility, or an
 absence of vulnerabilities throughout the app.
 
-Only fixed, unauthenticated npm and OSV endpoints are contacted by trusted code;
-redirects are refused and metadata-supplied URLs are never followed. No package
-code or lifecycle scripts run to collect facts. The parser tools are installed
-from the existing private lock in the trusted checkout before candidate checkout,
-without model credentials. Claude still has only Read, Glob and Grep.
+Trusted code uses fixed npm, OSV and GitHub endpoints. The job token is used
+only for same-repository CI evidence. Upstream requests are unauthenticated.
+Redirects are refused and metadata-supplied URLs are never followed. No package
+code or lifecycle scripts run to collect facts. The evidence job installs the
+parser tools from the existing private lock in its trusted checkout. The reviewer
+does not install parsers or fetch package evidence after reserving Claude. Claude
+still has only Read, Glob and Grep.
 
 Evidence collection permits at most 50 resulting affected versions, 100 distinct advisory
 records, four concurrent public requests, 1 MiB per response, 256 KiB for the
 finished packet, 500 explicit versions per affected record, 15 seconds per request
 and two minutes for collection. Missing,
 changed, withdrawn, oversized or malformed evidence holds the review. Unsupported
-advisory range formats are held rather than silently omitted. These are metadata
-safety bounds; the existing AI admission/attempt/review/turn/time limits and
-historical ledger schema remain unchanged. A failed preparation retains its grant
-and history; this feature does not introduce a same-head retry exemption.
+advisory range formats also hold the review.
+
+When a reviewer evidence request returns HTTP 502, 503 or 504, the factory waits
+60 seconds and checks once more after revalidating ownership and the PR. Rate
+limits and unverified evidence hold the attempt. The ledger keeps start times and
+outcomes under the original dependency attempt. If preparation stops here, no
+Claude reservation is created. Older attempts and all usage counters remain
+readable and keep their original values.
+
+A tracking pass reports unresolved evidence and review holds on the linked
+native Dependabot issue. After a confirmed dependency merge, a model-free pass
+checks tracked PRs for recovery, starting with PRs whose passing CI was queued.
+Successful **Factory CI** for a push to current `main` also wakes the
+**Dependency maintenance** refresh job when event pickup is enabled. It checks
+the trusted owner or factory-app run and requests at most one stale tracked
+PR refresh per pass. The refresh job does not reserve Claude, dispatch CI,
+change usage history, or merge a PR.
+Scheduled tracking continues to check the rest of the queue within its usual
+limits. When immutable comparison proves a native PR is behind `main`, the
+factory can post `@dependabot rebase` once for each current head and base pair.
+It keeps at most five base receipts per head and retains requests even if the
+response is lost. The PR becomes eligible for fresh CI and review when
+Dependabot supplies a new eligible head. A delivered comment confirms the
+request, and the new commit confirms that Dependabot acted.
+
+Automatic refresh needs the optional `FACTORY_DEPENDABOT_REBASE_TOKEN` Actions
+secret. Create a fine-grained personal access token as the repository owner,
+select only `cypress-realworld-app`, and grant only **Pull requests: Read and write**
+plus GitHub's required metadata permission. Save the token directly as an
+[Actions secret](https://github.com/haideearus/cypress-realworld-app/settings/secrets/actions).
+The trusted tracking step uses it only for the rebase command. An unconfigured
+credential leaves a manual rebase instruction on the tracking issue. Expired
+credentials can be replaced. Inspect an ambiguous request on the PR before
+sending another. [Dependabot command access](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/manage-dependabot-prs)
+· [Comment token permissions](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
 
 Sources: [Dependabot configuration and limits](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference),
 [fork version updates](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/enabling-and-disabling-version-updates),

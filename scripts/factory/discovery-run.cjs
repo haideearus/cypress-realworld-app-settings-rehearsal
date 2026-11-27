@@ -1,11 +1,19 @@
 const fs = require("node:fs");
 const p = require("./policy.cjs");
 const c = require("./discovery-contract.cjs");
+const { discoveryGrantsOn, hasThirdSweepHeadroom } = require("./discovery-policy.cjs");
 const { GitHub, Ledger, ROOT } = require("./github.cjs");
 const { diagnostic, withStage } = require("./discovery-diagnostics.cjs");
 const { DiscoveryStore } = require("./discovery-store.cjs");
-const { runtimeContext, output } = require("./controller.cjs");
+const { runtimeContext, output: writeOutputs } = require("./controller.cjs");
 const active = require("./active-tickets.cjs");
+const { CHARTERS } = require("./discovery-functional.cjs");
+const { sweepSummary, writeSummary } = require("./discovery-summary.cjs");
+
+function output(values, env) {
+  writeOutputs(values, { ...env, GITHUB_STEP_SUMMARY: undefined });
+  writeSummary(env, sweepSummary(values));
+}
 function selectSweep({
   state,
   registry,
@@ -14,6 +22,7 @@ function selectSweep({
   config,
   repairsWaiting = false,
   ciSignal = null,
+  quota,
 }) {
   p.assertNotStopped(state);
   if (!config.enabled || !config.discovery) return { ready: false, reason: "Discovery disabled" };
@@ -31,19 +40,31 @@ function selectSweep({
     )
   )
     return { ready: false, reason: "Duplicate main CI discovery signal" };
-  if (repairsWaiting || active.activeEntries(state).length)
+  if (repairsWaiting || active.usedCapacity(state))
     return { ready: false, reason: "Repairs or active work take priority" };
-  if ((state.days[day] || []).length >= config.daily)
+  if (p.dailyAdmissions(state, day) >= config.daily)
     return { ready: false, reason: "Daily ticket limit reached" };
-  if (
-    Object.values(state.grants).filter(
-      (g) => g.phase === "discover" && p.dayKey(new Date(g.at), config.timezone) === day
-    ).length >= 2
-  )
+  const discoveryGrants = Object.values(state.grants).filter((g) => g.phase === "discover");
+  const usedToday = discoveryGrantsOn(state, day, config.timezone);
+  if (usedToday.length >= (config.discoverySweeps ?? 2))
     return { ready: false, reason: "Discovery daily session limit reached" };
-  const offset = Number.parseInt(c.digest(day).slice(0, 4), 16) % c.CHARTERS.length;
-  const charters = [...c.CHARTERS.slice(offset), ...c.CHARTERS.slice(0, offset)];
-  const charter = charters.find((x) => !registry.sources[c.sweepKey(head, x, day)]);
+  if (usedToday.length >= 2 && !hasThirdSweepHeadroom(quota))
+    return { ready: false, reason: "Insufficient GitHub API headroom for a third discovery sweep" };
+  const recentUse = new Map();
+  for (const grant of discoveryGrants) {
+    const charter = state.tickets[String(grant.ticket)]?.discovery?.charter;
+    const at = Date.parse(grant.at);
+    if (CHARTERS.includes(charter))
+      recentUse.set(charter, Math.max(recentUse.get(charter) || 0, at));
+  }
+  const usedCharters = new Set(
+    usedToday.map((g) => state.tickets[String(g.ticket)]?.discovery?.charter)
+  );
+  const offset = Number.parseInt(c.digest(day).slice(0, 4), 16) % CHARTERS.length;
+  const charters = [...CHARTERS.slice(offset), ...CHARTERS.slice(0, offset)];
+  const charter = charters
+    .filter((x) => !usedCharters.has(x) && !registry.sources[c.sweepKey(head, x, day)])
+    .sort((a, b) => (recentUse.get(a) || 0) - (recentUse.get(b) || 0))[0];
   return charter
     ? { ready: true, charter }
     : { ready: false, reason: "No unused charter on this main revision" };
@@ -104,13 +125,14 @@ async function sourceFor(api, store, proof) {
   });
   return issue.number;
 }
-async function testedMain(api, context, event) {
+async function testedMain(api, context, event, { exactHead = false } = {}) {
   const branch = await api.request("GET", `${ROOT}/branches/main`);
   const head = branch.commit?.sha;
   if (!c.SHA.test(head) || head !== context.workflowSha)
     throw Error("Current main changed; fresh invocation required");
+  const query = `branch=main&event=push&status=success${exactHead ? `&head_sha=${head}` : ""}`;
   const runs = await api.pages(
-    `${ROOT}/actions/workflows/factory-ci.yml/runs?branch=main&event=push&status=success&per_page=100`,
+    `${ROOT}/actions/workflows/factory-ci.yml/runs?${query}&per_page=100`,
     "workflow_runs"
   );
   const run = runs.find(
@@ -126,6 +148,8 @@ async function testedMain(api, context, event) {
   if (!run) throw Error("Successful current-main push CI required");
   if (context.event === "workflow_run" && event.workflow_run?.id !== run.id)
     throw Error("Stale or unrelated main CI event");
+  if (context.event === "workflow_run" && context.actor === c.FACTORY_APP && !c.factoryAppCIOK(run))
+    throw Error("Factory App main CI identity mismatch");
   const jobs = await api.pages(
     `${ROOT}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
     "jobs"
@@ -144,9 +168,9 @@ async function verifyParent(api, context) {
     run.head_sha !== context.workflowSha ||
     run.head_branch !== "main" ||
     run.repository?.full_name !== p.REPOSITORY ||
-    run.actor?.login !== p.OWNER ||
-    run.actor.id !== 101267861 ||
-    run.triggering_actor?.login !== p.OWNER ||
+    run.actor?.login !== context.actor ||
+    !c.runActorOK(run) ||
+    (context.actor === c.FACTORY_APP && run.head_repository?.full_name !== c.REPOSITORY) ||
     run.event !== context.event ||
     run.status !== "in_progress"
   )
@@ -162,18 +186,14 @@ async function main(env = process.env, dependencies = {}) {
   const context = { ...runtimeContext(env), phase: "discover", slot: "discovery" };
   const preview =
     context.event === "workflow_dispatch" && (op !== "run" || inputs.dry_run !== false);
-  if (context.event === "schedule" && op !== "finish") {
-    const hour = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Bucharest",
-      hour: "2-digit",
-      hourCycle: "h23",
-    }).format(now);
-    if (!["03", "15"].includes(hour)) {
-      output({ outcome: "outside-local-window", ready: false, modelCalls: 0 }, env);
-      return;
-    }
-  }
-  const api = dependencies.api || new GitHub({ token: env.GH_TOKEN });
+  const api =
+    dependencies.api ||
+    new GitHub({
+      ...dependencies.githubOptions,
+      token: env.GH_TOKEN,
+      waitOnQuota: op === "finish",
+      onQuotaWait: (until) => console.log(`GitHub API quota exhausted; waiting until ${until}`),
+    });
   await verifyParent(api, context);
   const ledger = dependencies.ledger || new Ledger(api);
   const store = dependencies.store || new DiscoveryStore(api);
@@ -229,6 +249,12 @@ async function main(env = process.env, dependencies = {}) {
     output(r, env);
     return r;
   }
+  const turns = require("./feature-turn.cjs");
+  if (turns.priority(state, config, now)) {
+    const r = { outcome: "held", ready: false, modelCalls: 0, reason: turns.WAITING };
+    output(r, env);
+    return r;
+  }
   const tested = await testedMain(
     api,
     context,
@@ -244,6 +270,7 @@ async function main(env = process.env, dependencies = {}) {
     day,
     config: preview ? { ...config, enabled: true, discovery: true } : config,
     ciSignal: context.event === "workflow_run" ? tested.ciRunId : null,
+    quota: api.primaryQuota,
     repairsWaiting: queue.some(
       (i) =>
         !i.pull_request && !state.tickets[String(i.number)] && i.number !== config.activityIssue
@@ -296,7 +323,17 @@ async function main(env = process.env, dependencies = {}) {
     origin: "discovery-sweep",
     discovery: proof,
   };
-  const result = await ledger.update((s) => p.reserve(s, request, config));
+  let result;
+  try {
+    result = await ledger.update((s) =>
+      p.reserve(s, { ...request, quota: api.primaryQuota }, config)
+    );
+  } catch (error) {
+    if (error.code !== "DISCOVERY_HEADROOM" && error.message !== turns.WAITING) throw error;
+    const held = { outcome: "held", ready: false, reason: error.message, modelCalls: 0 };
+    output(held, env);
+    return held;
+  }
   output(
     {
       ready: true,

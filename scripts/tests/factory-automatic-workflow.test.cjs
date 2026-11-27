@@ -26,7 +26,13 @@ test("the pinned Claude action gets the bot allowance only from the verified wor
 test("automatic entry is main-only scheduled with a default read-only manual preview", () => {
   const workflow = load();
   assert.deepEqual(Object.keys(workflow.on).sort(), ["schedule", "workflow_dispatch"]);
-  assert.equal(workflow.on.schedule[0].cron, "17,47 * * * *");
+  assert.equal(workflow.on.schedule[0].cron, "3,13,23,33,43,53 * * * *");
+  const checkpoint = workflow.jobs.pick.steps.find(
+    (step) => step.name === "Hand off an idle app queue to dependency maintenance"
+  );
+  assert.match(checkpoint.if, /github\.event_name == 'schedule'/);
+  assert.match(checkpoint.if, /steps\.control\.outputs\.ready == 'false'/);
+  assert.match(checkpoint.if, /steps\.control\.outputs\.ticket == ''/);
   assert.equal(workflow.on.workflow_dispatch.inputs.dry_run.type, "boolean");
   assert.equal(workflow.on.workflow_dispatch.inputs.dry_run.default, true);
   assert.ok(workflow.jobs.pick.if.includes("refs/heads/main"));
@@ -46,14 +52,17 @@ test("finding retry is explicit, preview-default, ticket-scoped and cannot autom
     "continue-finding",
     "recover-finding",
     "retry-finding-api",
+    "queue-blocked-retry",
   ]);
   assert.equal(inputs.operation.default, "run");
   assert.equal(inputs.ticket.default, "");
+  assert.equal(inputs.fix_pr.default, "");
   assert.equal(inputs.dry_run.default, true);
   assert.ok(workflow.jobs.merge.if.includes("inputs.operation != 'retry-finding'"));
   assert.ok(workflow.jobs.merge.if.includes("inputs.operation != 'continue-finding'"));
   assert.ok(workflow.jobs.merge.if.includes("inputs.operation != 'recover-finding'"));
   assert.ok(workflow.jobs.merge.if.includes("inputs.operation != 'retry-finding-api'"));
+  assert.ok(workflow.jobs.merge.if.includes("inputs.operation != 'queue-blocked-retry'"));
   assert.equal(
     workflow.jobs.pick.steps.find((s) => s.id === "control").with.parameters,
     "${{ toJSON(inputs) }}"

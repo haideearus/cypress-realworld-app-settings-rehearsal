@@ -80,17 +80,34 @@ function candidate(route = "/users", grant = fx.grant, runId = "100") {
   );
 }
 test("an expired first source is retained as held and cannot wedge a later valid finding", async () => {
+  function functionalCandidate(charter, grant, runId) {
+    const proof = fx.proof(grant, charter);
+    proof.runId = runId;
+    return f.candidateFromEvidence(
+      fx.functionalEvidence(charter, grant),
+      0,
+      { ...fx.artifact, name: `discovery-evidence-${grant}`, workflowRunId: runId },
+      proof
+    );
+  }
   const state = f.emptyFindings(),
-    one = candidate(),
-    two = candidate("/bankAccounts", "88888888-8888-4888-8888-888888888888", "101");
+    one = functionalCandidate("functional-feed", fx.grant, "100"),
+    two = functionalCandidate(
+      "functional-directory",
+      "88888888-8888-4888-8888-888888888888",
+      "101"
+    );
   pub.stageFinding(state, one);
   pub.stageFinding(state, two);
   const store = fx.memoryStore(state);
   const controls = {
     stop: null,
-    tickets: {},
+    tickets: {
+      90: { discovery: { charter: one.source.charter } },
+      91: { discovery: { charter: two.source.charter } },
+    },
     grants: Object.fromEntries(
-      [one, two].map((x) => [
+      [one, two].map((x, i) => [
         x.source.grantId,
         {
           id: x.source.grantId,
@@ -98,6 +115,7 @@ test("an expired first source is retained as held and cannot wedge a later valid
           status: "finished",
           outcome: "discovery_complete",
           runId: x.source.runId,
+          ticket: 90 + i,
         },
       ])
     ),
@@ -180,6 +198,18 @@ test("lost resolution comment response is reconciled once and closes the preserv
   );
   assert.equal(store.state.records[one.key].comment.writeStarted, true);
   await runner().main(env(), { api, ledger, store });
+  assert.equal(issue.state, "open");
+  await runner().main(
+    {
+      ...env(),
+      FACTORY_INPUTS: JSON.stringify({
+        operation: "reconcile",
+        dry_run: false,
+        finding_key: one.key,
+      }),
+    },
+    { api, ledger, store }
+  );
   assert.equal(posts, 1);
   assert.equal(issue.state, "closed");
   assert.equal(store.state.records[one.key].resolutionClosed, true);
@@ -231,4 +261,138 @@ test("verified protected merge preserves old receipts and permits only descendan
   assert.equal(await pub.recurrenceAllowed(api, recorded, one), true);
   status = "behind";
   assert.equal(await pub.recurrenceAllowed(api, recorded, one), false);
+});
+
+function recordedMerge(state, found, issueNumber, comment, day = "2026-11-17") {
+  pub.stageFinding(state, found);
+  const row = pub.claimPublication(state, found.key, day, fx.context, config, false);
+  row.publication.issue = issueNumber;
+  row.publication.writeStarted = true;
+  row.publication.confirmation = fx.context;
+  row.status = "repair-merged";
+  row.resolution = {
+    kind: "protected-merge",
+    pr: issueNumber + 20,
+    head: fx.head,
+    mergeCommit: "c".repeat(40),
+    context: fx.context,
+  };
+  row.comment = comment;
+  return row;
+}
+
+const bot = { id: 41898282, login: "github-actions[bot]", type: "Bot" };
+function mergedIssue(row, state = "open", stateReason = null) {
+  return {
+    number: row.publication.issue,
+    state,
+    state_reason: stateReason,
+    title: row.publication.title,
+    body: row.publication.body,
+    user: bot,
+  };
+}
+
+test("a reviewed discovery merge leaves its issue open until production completes it", async () => {
+  const state = f.emptyFindings();
+  const found = candidate();
+  const row = recordedMerge(state, found, 77, {
+    body: "Recorded reviewed merge",
+    context: fx.context,
+    writeStarted: true,
+    id: 1,
+  });
+  const store = fx.memoryStore(state);
+  const ledger = fx.memoryStore({ stop: null });
+  const issue = mergedIssue(row);
+  const writes = [];
+  const api = {
+    async request(method, url) {
+      assert.match(url, /\/issues\/77$/);
+      if (method !== "GET") {
+        writes.push(method);
+        issue.state = "closed";
+        issue.state_reason = "completed";
+      }
+      return structuredClone(issue);
+    },
+  };
+  const options = { api, store, ledger, context: fx.context, config, key: found.key };
+
+  await pub.noteResolution(options);
+  assert.equal(issue.state, "open");
+  assert.deepEqual(writes, []);
+  assert.equal(store.state.records[found.key].resolutionClosed, false);
+
+  issue.state = "closed";
+  issue.state_reason = "not_planned";
+  await pub.noteResolution(options);
+  assert.equal(store.state.records[found.key].resolutionClosed, false);
+
+  issue.state_reason = "completed";
+  await pub.noteResolution(options);
+  assert.equal(store.state.records[found.key].resolutionClosed, true);
+  assert.deepEqual(writes, []);
+});
+
+test("waiting merged findings leave room for new resolution notes and closed-issue receipts", async () => {
+  const state = f.emptyFindings();
+  const waiting = ["/users", "/transactions", "/bankAccounts", "/notifications"].map((route, i) =>
+    recordedMerge(
+      state,
+      candidate(route, `77777777-7777-4777-8777-77777777777${i}`, String(100 + i)),
+      i + 77,
+      {
+        body: "Recorded reviewed merge",
+        context: fx.context,
+        writeStarted: true,
+        id: i + 1,
+      }
+    )
+  );
+  const grant = "88888888-8888-4888-8888-888888888888";
+  const source = fx.proof(grant, "functional-directory");
+  const found = f.candidateFromEvidence(
+    fx.functionalEvidence("functional-directory", grant),
+    0,
+    { ...fx.artifact, name: `discovery-evidence-${grant}` },
+    source
+  );
+  const fresh = recordedMerge(
+    state,
+    found,
+    81,
+    {
+      body: "Previously sent resolution note",
+      context: fx.context,
+      writeStarted: true,
+      id: null,
+    },
+    "2026-11-18"
+  );
+  const store = fx.memoryStore(state);
+  const ledger = fx.memoryStore({ stop: null });
+  const closed = mergedIssue(waiting[3], "closed", "completed");
+  const reads = [];
+  const writes = [];
+  const api = {
+    async request(method, url) {
+      if (method !== "GET") writes.push(method);
+      if (url.includes("/issues?state=closed")) return [closed];
+      if (url.includes("/issues/81/comments?")) {
+        reads.push("fresh-note");
+        return [{ id: 9, body: fresh.comment.body, user: bot }];
+      }
+      const row = [...waiting, fresh].find((r) => url.endsWith(`/issues/${r.publication.issue}`));
+      assert.ok(row);
+      if (row.publication.issue === closed.number) return closed;
+      return mergedIssue(row);
+    },
+  };
+
+  await pub.reconcileResolutions({ api, store, ledger, context: fx.context, config });
+  assert.deepEqual(reads, ["fresh-note"]);
+  assert.deepEqual(writes, []);
+  assert.equal(store.state.records[found.key].comment.id, 9);
+  assert.equal(store.state.records[waiting[3].candidate.key].resolutionClosed, true);
 });

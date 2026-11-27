@@ -65,6 +65,23 @@ async function releaseFacts(entry, read) {
       "Official upstream release and GitHub-verified signed tag. This is not npm provenance or proof that the npm distribution equals this source commit; registry gitHead may refer to a separate built distribution branch.",
   };
 }
+function verifyCIRun({ head, ci }, run, attempt) {
+  requireFact(
+    run.path === ".github/workflows/factory-ci.yml" &&
+      run.id === ci.runId &&
+      run.head_sha === head &&
+      run.repository?.full_name === REPOSITORY &&
+      run.head_repository?.full_name === REPOSITORY &&
+      run.event === "workflow_dispatch" &&
+      run.display_title === `Factory CI / ${ci.requestId}` &&
+      Number.isSafeInteger(attempt) &&
+      attempt > 0 &&
+      run.run_attempt === attempt &&
+      run.status === "completed" &&
+      run.conclusion === "success"
+  );
+}
+
 async function ciFacts(source, read) {
   const ci = source.ci;
   if (!ci) return { status: "not-supplied" };
@@ -83,41 +100,64 @@ async function ciFacts(source, read) {
     workflow.path === ".github/workflows/factory-ci.yml" &&
       Number.isSafeInteger(workflow.id) &&
       workflow.id > 0 &&
-      run.workflow_id === workflow.id &&
-      run.path === workflow.path &&
-      run.id === ci.runId &&
-      run.head_sha === source.head &&
-      run.repository?.full_name === REPOSITORY &&
-      run.head_repository?.full_name === REPOSITORY &&
-      run.event === "workflow_dispatch" &&
-      run.display_title === `Factory CI / ${ci.requestId}` &&
-      Number.isSafeInteger(run.run_attempt) &&
-      run.run_attempt > 0 &&
-      run.status === "completed" &&
-      run.conclusion === "success"
+      run.workflow_id === workflow.id
   );
-  const list = await read(`${root}/runs/${ci.runId}/attempts/${run.run_attempt}/jobs?per_page=100`);
-  requireFact(
-    Array.isArray(list.jobs) && list.total_count === list.jobs.length && list.jobs.length <= 100
-  );
-  const jobs = list.jobs.filter((j) => j.name === "verify");
-  requireFact(jobs.length === 1);
-  const job = jobs[0];
-  requireFact(
-    Number.isSafeInteger(job.id) &&
-      job.id > 0 &&
-      job.run_id === ci.runId &&
-      job.head_sha === source.head &&
-      job.status === "completed" &&
-      job.conclusion === "success" &&
-      Array.isArray(job.steps)
-  );
-  for (const name of FORM_STEPS)
+  verifyCIRun(source, run, run.run_attempt);
+  const listJobs = async (query) => {
+    const list = await read(`${root}/runs/${ci.runId}/${query}`);
     requireFact(
-      job.steps.filter(
-        (s) => s.name === name && s.status === "completed" && s.conclusion === "success"
-      ).length === 1
+      Array.isArray(list.jobs) && list.total_count === list.jobs.length && list.jobs.length <= 100
     );
+    return list.jobs;
+  };
+  const jobs = await listJobs(`attempts/${run.run_attempt}/jobs?per_page=100`);
+  const verify = jobs.filter((job) => job.name === "verify");
+  requireFact(verify.length === 1);
+  const [gate] = verify;
+  const successful = (job) =>
+    Number.isSafeInteger(job?.id) &&
+    job.id > 0 &&
+    job.run_id === ci.runId &&
+    job.head_sha === source.head &&
+    job.status === "completed" &&
+    job.conclusion === "success" &&
+    Array.isArray(job.steps);
+  const passedStep = (job, name) =>
+    job.steps.filter(
+      (step) => step.name === name && step.status === "completed" && step.conclusion === "success"
+    ).length === 1;
+
+  requireFact(successful(gate));
+  let job = gate;
+  const currentApp = jobs.filter((job) => job.name === "app");
+  const split = gate.steps.some((step) => step.name === "Require both test jobs to pass");
+  if (split || currentApp.length) {
+    requireFact(
+      gate.run_attempt === run.run_attempt && passedStep(gate, "Require both test jobs to pass")
+    );
+    requireFact(currentApp.length <= 1);
+    let app = currentApp;
+    if (!app.length && run.run_attempt > 1) {
+      // GitHub can reuse the app job when just the other test job is rerun.
+      const history = await listJobs("jobs?filter=all&per_page=100");
+      const earlier = history.filter((row) => row.name === "app");
+      requireFact(
+        earlier.every(
+          (row) =>
+            Number.isSafeInteger(row.run_attempt) &&
+            row.run_attempt > 0 &&
+            row.run_attempt < run.run_attempt
+        )
+      );
+      const latest = Math.max(...earlier.map((row) => row.run_attempt));
+      app = earlier.filter((row) => row.run_attempt === latest);
+    } else if (app.length) {
+      requireFact(app[0].run_attempt === run.run_attempt);
+    }
+    requireFact(app.length === 1 && successful(app[0]));
+    [job] = app;
+  }
+  for (const name of FORM_STEPS) requireFact(passedStep(job, name));
   return {
     status: "verified",
     head: source.head,
@@ -144,4 +184,4 @@ async function collectReviewContext(source, inventory, { publicJSON }) {
   for (const entry of unique) upstreamReleases.push(await releaseFacts(entry, publicJSON));
   return { upstreamReleases, ciEvidence: await ciFacts(source, publicJSON) };
 }
-module.exports = { collectReviewContext };
+module.exports = { collectReviewContext, verifyCIRun };

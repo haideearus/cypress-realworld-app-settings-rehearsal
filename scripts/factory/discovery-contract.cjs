@@ -1,9 +1,15 @@
 const { createHash } = require("node:crypto");
-const REPOSITORY = "haideearus/cypress-realworld-app";
+const REPOSITORY = "haideearus/cypress-realworld-app-settings-rehearsal";
 const WORKFLOW_REF = `${REPOSITORY}/.github/workflows/factory-discovery.yml@refs/heads/main`;
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const CHARTERS = Object.freeze(["session", "feed", "profile", "journeys"]);
+const FUNCTIONAL_CHARTERS = Object.freeze([
+  "functional-feed",
+  "functional-directory",
+  "functional-notifications",
+  "functional-settings",
+]);
+const CHARTERS = Object.freeze(["session", "feed", "profile", "journeys", ...FUNCTIONAL_CHARTERS]);
 const digest = (value) =>
   createHash("sha256")
     .update(typeof value === "string" ? value : JSON.stringify(value))
@@ -18,12 +24,45 @@ function exact(value, keys) {
   )
     throw Error("Invalid discovery schema");
 }
+const OWNER = "haideearus";
+const OWNER_ID = 101267861;
+const FACTORY_APP = "haideearus-settings-rehearsal[bot]";
+const FACTORY_APP_ID = 358822990;
+
+function actorAllowed(event, actor, triggeringActor) {
+  return (
+    actor === triggeringActor &&
+    (actor === OWNER || (event === "workflow_run" && actor === FACTORY_APP))
+  );
+}
+
+function runActorOK(run, event = run.event) {
+  const actor = run.actor;
+  const trigger = run.triggering_actor;
+  if (!actorAllowed(event, actor?.login, trigger?.login)) return false;
+  if (actor.login === OWNER) return actor.id === OWNER_ID && trigger.id === OWNER_ID;
+  return (
+    actor.id === FACTORY_APP_ID &&
+    trigger.id === FACTORY_APP_ID &&
+    actor.type === "Bot" &&
+    trigger.type === "Bot"
+  );
+}
+
+function factoryAppCIOK(run) {
+  return (
+    run?.actor?.login === FACTORY_APP &&
+    runActorOK(run, "workflow_run") &&
+    run.run_attempt === 1 &&
+    run.head_repository?.full_name === REPOSITORY
+  );
+}
+
 function contextOK(r) {
   return Boolean(
     r &&
       r.repository === REPOSITORY &&
-      r.actor === "haideearus" &&
-      r.triggeringActor === "haideearus" &&
+      actorAllowed(r.event, r.actor, r.triggeringActor) &&
       r.ref === "refs/heads/main" &&
       r.workflowRef === WORKFLOW_REF &&
       SHA.test(r.workflowSha || "") &&
@@ -92,9 +131,14 @@ module.exports = {
   SHA,
   HASH,
   CHARTERS,
+  FUNCTIONAL_CHARTERS,
   digest,
   sweepKey,
   exact,
+  FACTORY_APP,
+  actorAllowed,
+  runActorOK,
+  factoryAppCIOK,
   contextOK,
   validateProof,
   emptyDiscovery,

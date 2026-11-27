@@ -38,6 +38,10 @@ entry and protected automatic merging using a repository-only GitHub App. Follow
 [the installation and trial guide](factory/AUTOMATIC-PICKUP.md); code preparation
 does not establish ongoing unattended operation. Later monitoring, dependency and
 production-deployment installations are recorded in the current acceptance index.
+The [weekly feature rollout guide](factory/WEEKLY-FEATURES.md) covers the
+read-only preview, guarded pilot and live planner controls.
+The [Cloudflare pickup setup](factory/CLOUDFLARE-PICKUP.md) covers the opt-in
+ten-minute queue check.
 
 ## Subscription and spending
 

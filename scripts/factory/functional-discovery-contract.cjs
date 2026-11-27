@@ -1,11 +1,37 @@
 const WORKFLOW_FILE = "factory-functional-discovery.yml";
 const WORKFLOW_PATH = `.github/workflows/${WORKFLOW_FILE}`;
 const PROBE_MODE = "functional-browser";
+const WEEKLY_CHECKS = Object.freeze([
+  "request-acceptance",
+  "request-decline",
+  "transaction-comment",
+  "profile-picture-persistence",
+  "payment-persistence",
+  "notification-read-persistence",
+  "mobile-feed-filters",
+  "bank-account-deletion",
+]);
 const CHECKS = Object.freeze({
   "sign-in": "Browser sign-in",
   navigation: "Home and Settings navigation",
   settings: "Opening Settings",
+  "settings-persistence": "Saving Settings and reloading the profile",
   "form-validation": "Settings form validation",
+  "sign-in-accessibility": "Sign-in field labels",
+  "bank-account-onboarding": "Bank account onboarding",
+  "feed-tabs": "Switching between transaction feed tabs",
+  "transaction-form-validation": "New transaction form validation",
+  "notifications-populated": "Populated Notifications view",
+  "notifications-empty": "Empty Notifications view",
+  "request-acceptance": "Receiving and accepting a money request",
+  "request-decline": "Declining a money request without changing balances",
+  "transaction-comment": "Saving a transaction comment through reload",
+  "profile-picture-persistence": "Uploading and reloading a profile picture",
+  "payment-persistence": "Finding a demo payment and its receipt after signing in again",
+  "notification-read-persistence":
+    "Dismissing a notification and checking unread items after sign-in",
+  "mobile-feed-filters": "Filtering and restoring the transaction feed on a small screen",
+  "bank-account-deletion": "Deleting demo bank accounts and signing in again",
 });
 const ASSERTIONS = Object.freeze({
   "sign-in": ["sign-in-form", "sign-in-route", "sign-in-identity", "sign-in-session"],
@@ -16,13 +42,114 @@ const ASSERTIONS = Object.freeze({
     "navigation-home-route",
   ],
   settings: ["settings-form", "settings-profile"],
+  "settings-persistence": ["settings-persistence-saved", "settings-persistence-reloaded"],
   "form-validation": [
     "settings-first-name-required",
     "settings-email-required",
     "settings-email-invalid",
     "settings-save-disabled",
   ],
+  "sign-in-accessibility": ["sign-in-username-label", "sign-in-password-label"],
+  "feed-tabs": [
+    "feed-friends-tab",
+    "feed-friends-route",
+    "feed-friends-selected",
+    "feed-mine-tab",
+    "feed-mine-route",
+    "feed-mine-selected",
+    "feed-everyone-tab",
+    "feed-everyone-route",
+    "feed-everyone-selected",
+  ],
+  "transaction-form-validation": [
+    "transaction-new-link",
+    "transaction-new-route",
+    "transaction-recipient-search",
+    "transaction-fixture-users-loaded",
+    "transaction-fixture-recipient",
+    "transaction-form",
+    "transaction-amount-required",
+    "transaction-note-required",
+    "transaction-submit-disabled",
+    "transaction-submit-enabled",
+  ],
+  "notifications-populated": [
+    "notifications-list-link",
+    "notifications-list-route",
+    "notifications-list-present",
+    "notifications-seed-items",
+    "notifications-seed-comment",
+  ],
+  "notifications-empty": [
+    "notifications-empty-seeded",
+    "notifications-empty-link",
+    "notifications-empty-route",
+    "notifications-empty-view",
+  ],
+  "request-acceptance": [
+    "request-acceptance-created",
+    "request-acceptance-notification",
+    "request-acceptance-action",
+    "request-acceptance-status",
+    "request-acceptance-balances",
+  ],
+  "request-decline": [
+    "request-decline-created",
+    "request-decline-notification",
+    "request-decline-action",
+    "request-decline-status",
+    "request-decline-balances",
+  ],
+  "transaction-comment": [
+    "transaction-comment-saved",
+    "transaction-comment-visible",
+    "transaction-comment-reloaded",
+  ],
+  "profile-picture-persistence": [
+    "avatar-file-control",
+    "avatar-uploaded",
+    "avatar-reference",
+    "avatar-profile-saved",
+    "avatar-success",
+    "avatar-profile-reloaded",
+    "avatar-image-after-reload",
+  ],
+  "payment-persistence": [
+    "payment-created",
+    "payment-sender-balance",
+    "payment-recipient-balance",
+    "payment-sender-history",
+    "payment-recipient-history",
+    "payment-recipient-notification",
+    "payment-receipt-opened",
+  ],
+  "notification-read-persistence": ["notification-read-dismissed", "notification-read-reloaded"],
+  "mobile-feed-filters": [
+    "mobile-filters-unfiltered",
+    "mobile-filters-amount",
+    "mobile-filters-empty",
+    "mobile-filters-date",
+    "mobile-filters-reset",
+  ],
+  "bank-account-deletion": [
+    "bank-deletion-first-removed",
+    "bank-deletion-active-account",
+    "bank-deletion-last-removed",
+    "bank-deletion-onboarding",
+  ],
+  "bank-account-onboarding": [
+    "onboarding-wizard",
+    "onboarding-save-rejected",
+    "onboarding-save-confirmed",
+    "onboarding-finish",
+    "onboarding-sign-out",
+    "onboarding-account-after-sign-in",
+  ],
 });
+
+function functionalChecks(extended = false) {
+  return Object.keys(ASSERTIONS).filter((check) => extended || !WEEKLY_CHECKS.includes(check));
+}
 
 function validAssertion(check, assertion) {
   return (
@@ -55,6 +182,8 @@ module.exports = {
   PROBE_MODE,
   CHECKS,
   ASSERTIONS,
+  WEEKLY_CHECKS,
+  functionalChecks,
   validAssertion,
   validateFunctionalResult,
   functionalIssueCheck,

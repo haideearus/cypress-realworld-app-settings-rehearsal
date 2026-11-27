@@ -6,9 +6,92 @@ const { eligibleIssue } = require("./automation.cjs");
 const { verifyMonitorIssue } = require("./monitor-origin.cjs");
 const { MonitorStore } = require("./monitor-state.cjs");
 const slots = require("./active-tickets.cjs");
-async function verifiedRun(api, id, attempt, file, { terminal = true, success = true } = {}) {
+const dependency = require("./dependency-contract.cjs");
+// Bound GitHub reads when a single completion encounters a backlog of receipts.
+const MAX_DRAIN_SOURCE_CHECKS = 20;
+const DRAIN_SOURCE_CHECK_WINDOW_MS = 60000;
+
+const alertWakeConfig = (vars) => ({
+  alertRepair: vars.FACTORY_DEPENDENCY_ALERT_REPAIR_ENABLED === "true",
+  appSlug: vars.FACTORY_GITHUB_APP_SLUG,
+});
+
+async function verifyAlertCI(api, pr, run, config, bound = false) {
+  // GitHub can remove the PR association after merge. A bound receipt already
+  // pins the original association, head and CI run before allowing any work.
+  const associationRemoved =
+    bound &&
+    pr.state === "closed" &&
+    pr.merged === true &&
+    dependency.SHA.test(pr.merge_commit_sha || "") &&
+    Array.isArray(run.pull_requests) &&
+    run.pull_requests.length === 0;
+  if (
+    !dependency.alertKey(pr.head.ref) ||
+    run.event !== "pull_request" ||
+    run.head_sha !== pr.head.sha ||
+    run.head_branch !== pr.head.ref ||
+    run.display_title !== `Factory CI / ${pr.number}` ||
+    (!associationRemoved && !run.pull_requests?.some((p) => p.number === pr.number)) ||
+    run.actor?.type !== "Bot" ||
+    run.actor.login !== pr.user.login ||
+    run.actor.id !== pr.user.id
+  )
+    throw Error("Dependency alert CI identity changed");
+
+  const { verifyAlertPR, verifyAlertGitDiff } = require("./dependency-alert-repair.cjs");
+  const receipt = await verifyAlertPR(api, pr, config, undefined, bound);
+  if (!bound && receipt.phase !== "ready") throw Error("Dependency alert is not ready");
+
+  if (receipt.base === pr.base.sha) {
+    const files = await api.request("GET", `${ROOT}/pulls/${pr.number}/files?per_page=3`);
+    dependency.alertFilesOK(files, receipt);
+  } else if (bound) {
+    await verifyAlertGitDiff(api, receipt);
+  }
+  const jobs = await api.pages(
+    `${ROOT}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
+    "jobs"
+  );
+  const verify = jobs.filter((job) => job.name === "verify");
+  if (
+    verify.length !== 1 ||
+    verify[0].run_id !== run.id ||
+    verify[0].head_sha !== run.head_sha ||
+    verify[0].status !== "completed" ||
+    verify[0].conclusion !== "success"
+  )
+    throw Error("Dependency alert CI verify job failed identity checks");
+
+  if (!bound) {
+    const compare = await api.request("GET", `${ROOT}/compare/${receipt.base}...${pr.head.sha}`);
+    const main = await api.request("GET", `${ROOT}/git/ref/heads/main`);
+    if (
+      !c.SHA.test(main?.object?.sha || "") ||
+      !c.SHA.test(compare?.merge_base_commit?.sha || "") ||
+      !Number.isSafeInteger(compare.behind_by) ||
+      compare.behind_by < 0
+    )
+      throw Error("Dependency alert CI base evidence unavailable");
+    if (
+      main.object.sha !== receipt.base ||
+      compare.behind_by !== 0 ||
+      compare.merge_base_commit.sha !== receipt.base
+    )
+      throw new c.StaleWakeSource("Dependency alert CI base is stale");
+  }
+  return receipt;
+}
+
+async function verifiedRun(
+  api,
+  id,
+  attempt,
+  file,
+  { terminal = true, success = true, fetchedRun = null } = {}
+) {
   const [run, workflow] = await Promise.all([
-    api.request("GET", `${ROOT}/actions/runs/${id}/attempts/${attempt}`),
+    fetchedRun || api.request("GET", `${ROOT}/actions/runs/${id}/attempts/${attempt}`),
     api.request("GET", `${ROOT}/actions/workflows/${file}`),
   ]);
   if (
@@ -25,6 +108,95 @@ async function verifiedRun(api, id, attempt, file, { terminal = true, success = 
   )
     throw Error("Untrusted source workflow run");
   return run;
+}
+async function mainQueueSignal(api, run) {
+  if (
+    run.event !== "push" ||
+    run.head_branch !== "main" ||
+    run.run_attempt !== 1 ||
+    run.conclusion !== "success" ||
+    !require("./discovery-contract.cjs").runActorOK(run, "workflow_run")
+  )
+    return null;
+  const jobs = await api.pages(`${ROOT}/actions/runs/${run.id}/attempts/1/jobs`, "jobs");
+  const verify = jobs.filter((job) => job.name === "verify");
+  if (
+    verify.length !== 1 ||
+    verify[0].run_id !== run.id ||
+    verify[0].head_sha !== run.head_sha ||
+    verify[0].status !== "completed" ||
+    verify[0].conclusion !== "success"
+  )
+    return null;
+  return {
+    kind: "drain",
+    lane: "app",
+    number: run.id,
+    head: run.head_sha,
+    criteriaHash: c.digest(["main-queue", run.head_sha]),
+    revision: "main-queue",
+    sourceRun: String(run.id),
+    sourceAttempt: 1,
+    actor: { login: run.actor.login, id: run.actor.id },
+  };
+}
+// A later parent can confirm a protected merge without reserving another model.
+// The terminal merge receipt identifies that parent, even when it has zero grants.
+function appMergeOwners(state, runId, runAttempt) {
+  return Object.entries(state.tickets).filter(
+    ([, t]) =>
+      t.origin === "factory" &&
+      t.automatic &&
+      t.merge?.runId === String(runId) &&
+      t.merge.runAttempt === runAttempt
+  );
+}
+async function appMergeSignal(
+  api,
+  state,
+  run,
+  rows = appMergeOwners(state, run.id, run.run_attempt)
+) {
+  if (run.path !== ".github/workflows/factory-automatic.yml" || run.head_branch !== "main")
+    return null;
+  if (rows.length !== 1) return null;
+  const [id, ticket] = rows[0];
+  const number = Number(id);
+  const merge = ticket.merge;
+  if (
+    slots.activeFor(state, number) ||
+    ticket.status !== "reviewed" ||
+    merge.status !== "merged" ||
+    merge.pr !== ticket.pr ||
+    merge.head !== ticket.head ||
+    !c.SHA.test(merge.mergeCommit || "")
+  )
+    return null;
+  const pr = await api.request("GET", `${ROOT}/pulls/${ticket.pr}`);
+  if (
+    pr.number !== ticket.pr ||
+    pr.state !== "closed" ||
+    pr.merged !== true ||
+    pr.merge_commit_sha !== merge.mergeCommit ||
+    pr.head?.sha !== ticket.head ||
+    pr.head?.ref !== `agent/factory-${id}` ||
+    pr.head?.repo?.full_name !== c.REPOSITORY ||
+    pr.base?.ref !== "main" ||
+    pr.base?.repo?.full_name !== c.REPOSITORY ||
+    pr.user?.login !== `${ticket.automatic.appSlug}[bot]`
+  )
+    return null;
+  return {
+    kind: "drain",
+    lane: "app",
+    number,
+    head: merge.mergeCommit,
+    criteriaHash: c.digest([pr.number, ticket.head, merge.mergeCommit]),
+    revision: "app-merge",
+    sourceRun: String(run.id),
+    sourceAttempt: run.run_attempt,
+    actor: { login: run.actor.login, id: run.actor.id },
+  };
 }
 async function verifyProducer(api, context) {
   if (
@@ -52,14 +224,146 @@ async function verifyProducer(api, context) {
     event: r.event,
   };
 }
-async function classifySignal({ api, event, context, ledger = new Ledger(api) }) {
+function interruptedAppSignal(state, run, boundTicket = null) {
+  if (
+    run.path !== ".github/workflows/factory-automatic.yml" ||
+    run.head_branch !== "main" ||
+    run.run_attempt !== 1 ||
+    !["cancelled", "timed_out"].includes(run.conclusion)
+  )
+    return null;
+  const owner = { runId: String(run.id), runAttempt: run.run_attempt };
+  const entry = slots
+    .activeEntries(state)
+    .find((e) => e.runId === owner.runId && e.runAttempt === owner.runAttempt);
+  const number = boundTicket ?? entry?.ticket;
+  const ticket = state.tickets[number];
+  if (
+    !require("./published-review-recovery.cjs").functionalPublication(ticket) ||
+    ticket.monitor.issue !== number ||
+    ticket.branch !== `agent/factory-${number}`
+  )
+    return null;
+  const recovery = ticket.publishedRecovery;
+  const original = ticket.automatic.runId === owner.runId;
+  const previous = boundTicket !== null ? (recovery?.interruptedParents ?? []) : [];
+  const parent = original
+    ? ticket.automatic
+    : [recovery?.parent, ...previous].find((p) => p?.runId === owner.runId);
+  if (!parent || parent.runAttempt !== run.run_attempt || parent.workflowSha !== run.head_sha)
+    return null;
+  const retained = boundTicket !== null && recovery?.interruptedHead;
+  if (
+    !retained &&
+    (entry?.ticket !== number ||
+      (original ? !!recovery : !recovery?.interruptedHead) ||
+      ticket.approval ||
+      ticket.merge ||
+      !["awaiting_review", "reviewing"].includes(ticket.status))
+  )
+    return null;
+  const head = original ? (recovery?.interruptedHead ?? ticket.head) : parent.head;
+  return {
+    kind: "drain",
+    lane: "app",
+    number,
+    head,
+    criteriaHash: c.digest([number, ticket.pr, head, run.head_sha]),
+    revision: "app-interrupted",
+    sourceRun: owner.runId,
+    sourceAttempt: owner.runAttempt,
+    actor: { login: run.actor.login, id: run.actor.id },
+  };
+}
+function releasedAppSignal(state, run) {
+  if (
+    run.path !== ".github/workflows/factory-automatic.yml" ||
+    run.head_branch !== "main" ||
+    !require("./wake-queue.cjs").appWakeId(run) ||
+    ![run.actor, run.triggering_actor].every(
+      (actor) => actor?.login === c.BOT && actor.id === c.BOT_ID
+    )
+  )
+    return null;
+  const runId = String(run.id);
+  const releases = state.audit.filter(
+    (row) =>
+      row.event === "published_review_terminal_run_released" &&
+      row.receiverRunId === runId &&
+      row.receiverAttempt === run.run_attempt &&
+      row.receiverSha === run.head_sha
+  );
+  if (releases.length !== 1) return null;
+  const previous = releases[0];
+  if (!state.tickets[previous.ticket]?.publishedRecovery?.interruptedHead) return null;
+  return {
+    kind: "drain",
+    lane: "app",
+    number: previous.ticket,
+    head: run.head_sha,
+    criteriaHash: c.digest([
+      previous.ticket,
+      previous.runId,
+      previous.runAttempt,
+      run.display_title,
+    ]),
+    revision: "app-release",
+    sourceRun: runId,
+    sourceAttempt: run.run_attempt,
+    actor: { login: run.actor.login, id: run.actor.id },
+  };
+}
+async function preparationDrain(api, state, run, store) {
+  const runId = String(run.id);
+  const runAttempt = run.run_attempt;
+  const tickets = Object.values(state.tickets).filter((ticket) => {
+    const attempt = ticket.dependency?.attempts.at(-1);
+    return attempt?.runId === runId && attempt.runAttempt === runAttempt;
+  });
+  if (tickets.length !== 1) return null;
+  const [ticket] = tickets;
+  const attempt = dependency.validateTicket(ticket);
+  if (
+    ticket.status !== "blocked" ||
+    ticket.merge ||
+    attempt.workflowSha !== run.head_sha ||
+    !state.audit.some(
+      (row) =>
+        row.event === "dependency_preparation_blocked" &&
+        row.runId === runId &&
+        row.ticket === ticket.pr &&
+        row.head === attempt.head
+    ) ||
+    !(await require("./trusted-wake.cjs").verifyPreparationOrigin(api, run, ticket, attempt, store))
+  )
+    return null;
+  return {
+    kind: "drain",
+    lane: "dependency",
+    number: ticket.pr,
+    head: run.head_sha,
+    criteriaHash: c.digest([attempt.head, attempt.base]),
+    revision: c.preparationRevision(runAttempt),
+    sourceRun: runId,
+    sourceAttempt: runAttempt,
+    actor: { login: run.actor.login, id: run.actor.id },
+  };
+}
+async function classifySignal({
+  api,
+  event,
+  context,
+  vars = {},
+  ledger = new Ledger(api),
+  store = new WakeStore(api),
+}) {
   if (event.repository?.full_name !== c.REPOSITORY) return null;
   const { state } = await ledger.read();
   if (context.event === "issues") {
     if (
       !["opened", "labeled", "reopened", "edited"].includes(event.action) ||
       event.sender?.login !== c.OWNER ||
-      event.sender?.id !== 101267861 ||
+      event.sender?.id !== c.OWNER_ID ||
       context.actor !== c.OWNER ||
       !Number.isSafeInteger(event.issue?.number)
     )
@@ -161,38 +465,58 @@ async function classifySignal({ api, event, context, ledger = new Ledger(api) })
     };
   }
   if (source.path === ".github/workflows/factory-ci.yml") {
-    const r = await verifiedRun(api, String(source.id), source.run_attempt, "factory-ci.yml");
-    // Only native PR CI can wake dependency intake, never owner harness/dispatch CI.
-    if (r.event !== "pull_request") return null;
-    const d = require("./dependency-contract.cjs");
+    const r = await verifiedRun(api, String(source.id), source.run_attempt, "factory-ci.yml", {
+      success: source.event !== "push",
+    });
+    if (r.event === "push") {
+      if (r.head_sha !== context.workflowSha || r.conclusion !== "success") return null;
+      const main = await api.request("GET", `${ROOT}/git/ref/heads/main`);
+      return main.object?.sha === r.head_sha ? mainQueueSignal(api, r) : null;
+    }
+    if (r.event !== "pull_request" || r.conclusion !== "success") return null;
+    const config = alertWakeConfig(vars);
     for (const link of r.pull_requests || []) {
       let pr;
       try {
-        pr = d.prOK(await api.request("GET", `${ROOT}/pulls/${link.number}`));
+        pr = dependency.prOK(
+          await api.request("GET", `${ROOT}/pulls/${link.number}`),
+          false,
+          config
+        );
       } catch {
         return null;
       }
-      if (pr.head.sha !== r.head_sha) return null;
-      d.filesOK(await api.request("GET", `${ROOT}/pulls/${pr.number}/files?per_page=3`));
-      const jobs = await api.pages(
-        `${ROOT}/actions/runs/${r.id}/attempts/${r.run_attempt}/jobs`,
-        "jobs"
-      );
-      if (
-        jobs.filter(
-          (j) => j.name === "verify" && j.conclusion === "success" && j.status === "completed"
-        ).length !== 1
-      )
-        return null;
-      const main = await api.request("GET", `${ROOT}/git/ref/heads/main`);
-      if (pr.base.sha !== main.object?.sha) return null;
+      if (pr.number !== link.number || pr.head.sha !== r.head_sha) return null;
+      const generated = Boolean(dependency.alertKey(pr.head.ref));
+      let revision = pr.base.sha;
+      if (generated) {
+        try {
+          revision = (await verifyAlertCI(api, pr, r, config)).base;
+        } catch {
+          return null;
+        }
+      } else {
+        dependency.filesOK(await api.request("GET", `${ROOT}/pulls/${pr.number}/files?per_page=3`));
+        const jobs = await api.pages(
+          `${ROOT}/actions/runs/${r.id}/attempts/${r.run_attempt}/jobs`,
+          "jobs"
+        );
+        if (
+          jobs.filter(
+            (j) => j.name === "verify" && j.conclusion === "success" && j.status === "completed"
+          ).length !== 1
+        )
+          return null;
+        const main = await api.request("GET", `${ROOT}/git/ref/heads/main`);
+        if (pr.base.sha !== main.object?.sha) return null;
+      }
       return {
-        kind: "dependency-ci",
+        kind: generated ? "dependency-alert-ci" : "dependency-ci",
         lane: "dependency",
         number: pr.number,
         head: pr.head.sha,
-        criteriaHash: d.criteria(pr.number),
-        revision: pr.base.sha,
+        criteriaHash: dependency.criteria(pr.number),
+        revision,
         sourceRun: String(r.id),
         sourceAttempt: r.run_attempt,
         actor: { login: r.actor.login, id: r.actor.id },
@@ -200,15 +524,7 @@ async function classifySignal({ api, event, context, ledger = new Ledger(api) })
     }
     return null;
   }
-  if (
-    ![
-      "factory-automatic.yml",
-      "factory-dependencies.yml",
-      "factory-agents.yml",
-      "factory-discovery.yml",
-    ].some((f) => source.path === `.github/workflows/${f}`)
-  )
-    return null;
+  if (!Object.hasOwn(c.DRAIN_LANES, source.path)) return null;
   const r = await verifiedRun(
     api,
     String(source.id),
@@ -216,21 +532,31 @@ async function classifySignal({ api, event, context, ledger = new Ledger(api) })
     source.path.split("/").at(-1),
     { success: false }
   );
-  // Completion is a drain signal only if a real reservation finished and its slot was released.
+  // Only the interrupted owner can wake a targeted reconciliation while its slot is held.
+  const interrupted = interruptedAppSignal(state, r);
+  if (interrupted) return interrupted;
+  // Other completions advance the queue once their lease has been released.
   const grants = Object.values(state.grants).filter(
     (g) => g.runId === String(r.id) && g.runAttempt === r.run_attempt
   );
   if (
-    !grants.length ||
     grants.some((g) => g.status !== "finished") ||
     slots
       .activeEntries(state)
       .some((e) => e.runId === String(r.id) && e.runAttempt === r.run_attempt)
   )
     return null;
+  if (r.path === `.github/workflows/${c.LANES.app}`) {
+    const owners = appMergeOwners(state, r.id, r.run_attempt);
+    if (owners.length) return appMergeSignal(api, state, r, owners);
+  }
+  if (!grants.length)
+    return r.path === `.github/workflows/${c.LANES.dependency}`
+      ? preparationDrain(api, state, r, store)
+      : releasedAppSignal(state, r);
   return {
     kind: "drain",
-    lane: source.path.endsWith("factory-dependencies.yml") ? "dependency" : "app",
+    lane: c.DRAIN_LANES[r.path],
     number: grants[0].ticket,
     head: r.head_sha,
     criteriaHash: c.digest(grants.map((g) => g.id).sort()),
@@ -257,8 +583,39 @@ async function handleWake({
     event.issue?.number === Number(vars.FACTORY_ACTIVITY_ISSUE_NUMBER)
   )
     return { outcome: "ignored" };
-  let signal = await classifySignal({ api, event, context, ledger });
-  if (!signal) return { outcome: "ignored" };
+  const source = event.workflow_run;
+  const queue = require("./wake-queue.cjs");
+  const idleHandoff =
+    !preview &&
+    event.repository?.full_name === c.REPOSITORY &&
+    context.event === "workflow_run" &&
+    event.action === "completed" &&
+    source?.path === ".github/workflows/factory-automatic.yml" &&
+    (source.event === "schedule" ||
+      queue.manualPickup(source) ||
+      queue.appWakeId(source) ||
+      (vars.FACTORY_EXTERNAL_PICKUP_ENABLED === "true" &&
+        require("./pickup-timer.cjs").timerRun(source))) &&
+    source.conclusion === "success" &&
+    c.ID.test(String(source.id))
+      ? await queue.nextDependency({
+          api,
+          source,
+          context,
+          vars,
+          ledger,
+          store,
+          state: (await ledger.read()).state,
+        })
+      : null;
+  if (idleHandoff?.duplicate) return { outcome: "duplicate" };
+  let signal =
+    idleHandoff?.signal ?? (await classifySignal({ api, event, context, vars, ledger, store }));
+  if (!signal)
+    return {
+      outcome: "ignored",
+      ...(idleHandoff?.skipped?.length ? { skipped: idleHandoff.skipped } : {}),
+    };
   c.validateSignal(signal);
   if (preview) return { outcome: "preview", lane: signal.lane, number: signal.number };
   const controls = (await ledger.read()).state;
@@ -267,46 +624,133 @@ async function handleWake({
     return { outcome: "disabled" };
   const concurrent = Number(vars.FACTORY_MAX_CONCURRENT_TICKETS);
   if (![1, 2].includes(concurrent)) throw Error("Invalid wake capacity setting");
-  let pendingId;
-  if (signal.kind === "drain") {
-    const { state } = await store.read();
-    if (
-      Object.values(state.receipts).some(
-        (r) =>
-          r.signal.kind === "drain" &&
-          r.signal.sourceRun === signal.sourceRun &&
-          r.signal.sourceAttempt === signal.sourceAttempt &&
-          r.status !== "pending"
-      )
-    )
-      return { outcome: "duplicate" };
-    const pending = Object.values(state.receipts).find(
-      (r) => r.status === "pending" && r.signal.kind !== "drain"
+  const interruptedOwner =
+    c.isInterruptedApp(signal) &&
+    slots.owns(slots.activeFor(controls, signal.number), {
+      ticket: signal.number,
+      runId: signal.sourceRun,
+      runAttempt: signal.sourceAttempt,
+    });
+  const busy =
+    !interruptedOwner &&
+    !slots.capacity(controls, concurrent) &&
+    (!idleHandoff?.terminal ||
+      (await require("./wake-queue.cjs").terminalDependency(
+        api,
+        controls,
+        vars.FACTORY_AUTOMERGE_ENABLED === "true"
+      )) !== idleHandoff.terminal);
+  const drain =
+    signal.kind === "drain" &&
+    !c.isQueueCheckDrain(signal) &&
+    !c.isMainQueueCheck(signal) &&
+    !c.isInterruptedApp(signal)
+      ? signal
+      : null;
+  const sourceDrain = idleHandoff?.queueCheck ?? drain;
+  const preparation = c.isPreparationDrain(signal);
+  const alreadyDrained = (state) =>
+    sourceDrain &&
+    Object.values(state.receipts).some(
+      (r) =>
+        r.signal.kind === "drain" &&
+        r.signal.sourceRun === sourceDrain.sourceRun &&
+        r.signal.sourceAttempt === sourceDrain.sourceAttempt &&
+        r.status !== "pending"
     );
-    if (pending) {
-      signal = { ...signal, lane: pending.signal.lane };
-      pendingId = pending.id;
+  const observed = [];
+  const deferred = [];
+  const skipped = idleHandoff?.skipped || [];
+  let completedDrain =
+    !busy && idleHandoff?.queueCheck && idleHandoff.queueCheck !== signal
+      ? c.createWake({ signal: idleHandoff.queueCheck, producer })
+      : undefined;
+  if (drain && !busy) {
+    const { state } = await store.read();
+    if (alreadyDrained(state)) return { outcome: "duplicate" };
+    const pending = Object.values(state.receipts)
+      .filter(
+        (r) =>
+          r.status === "pending" &&
+          (r.signal.kind !== "drain" || c.isAppQueueCheck(r.signal)) &&
+          (preparation
+            ? r.signal.lane === "dependency" && c.isDependencyCI(r.signal)
+            : drain.lane === "app" || r.signal.kind !== "finding")
+      )
+      .slice(0, MAX_DRAIN_SOURCE_CHECKS);
+    const deadline = Date.now() + DRAIN_SOURCE_CHECK_WINDOW_MS;
+    for (const queued of pending) {
+      if (Date.now() >= deadline) break;
+      try {
+        if (
+          queued.signal.lane === "app" &&
+          queued.signal.kind !== "drain" &&
+          controls.tickets[String(queued.signal.number)]
+        )
+          throw new c.StaleWakeSource("Wake issue already admitted");
+        if (
+          preparation &&
+          controls.tickets[String(queued.signal.number)]?.dependency?.attempts.some(
+            (attempt) => attempt.head === queued.signal.head
+          )
+        )
+          throw new c.StaleWakeSource("Wake dependency head already attempted");
+        await require("./trusted-wake.cjs").verifySource(api, queued.signal, false, vars);
+      } catch (error) {
+        const expired = error instanceof c.StaleWakeSource;
+        (expired ? observed : deferred).push(queued.id);
+        skipped.push({
+          kind: queued.signal.kind,
+          number: queued.signal.number,
+          reason: expired ? error.message : "Wake evidence could not be verified",
+        });
+        continue;
+      }
+      // Ordinary app pickup selects its own priority work from the app queue.
+      if (drain.lane === "app" && queued.signal.lane === "app") {
+        observed.push(queued.id);
+        break;
+      }
+      completedDrain = c.createWake({ signal: drain, producer });
+      signal = queued.signal;
+      break;
     }
   }
+  // Preparation completions only hand off a verified, targeted CI receipt.
+  const dispatch = !preparation || signal !== drain;
+  const diagnostics = skipped.length ? { skipped } : {};
   const receipt = c.createWake({ signal, producer });
-  const busy = !slots.capacity(controls, concurrent);
   const claim = await store.update((state) => {
     c.validateWakes(state);
     const old = state.receipts[receipt.id];
-    if (old && old.status !== "pending") return { state, duplicate: true };
-    if (!old && Object.keys(state.receipts).length >= c.MAX_RECEIPTS)
+    const oldDrain = completedDrain && state.receipts[completedDrain.id];
+    if ((old && old.status !== "pending") || alreadyDrained(state))
+      return { state, duplicate: true };
+    const newReceipts = Number(!old) + Number(Boolean(completedDrain && !oldDrain));
+    if (Object.keys(state.receipts).length + newReceipts > c.MAX_RECEIPTS)
       throw Error("Wake registry full; retained receipts require owner maintenance");
     state.receipts[receipt.id] = old || receipt;
     if (!busy) {
-      state.receipts[receipt.id].status = "intent";
+      state.receipts[receipt.id].status = dispatch ? "intent" : "observed";
       state.receipts[receipt.id].producer = producer;
-      if (pendingId && state.receipts[pendingId]?.status === "pending")
-        state.receipts[pendingId].status = "observed";
+      if (completedDrain)
+        state.receipts[completedDrain.id] = { ...completedDrain, status: "observed" };
+      for (const id of observed) {
+        if (state.receipts[id]?.status === "pending") state.receipts[id].status = "observed";
+      }
+      // Move temporarily unverifiable receipts behind unchecked work for the next completion.
+      for (const id of deferred) {
+        const pending = state.receipts[id];
+        if (pending?.status !== "pending") continue;
+        delete state.receipts[id];
+        state.receipts[id] = pending;
+      }
     }
     return { state, duplicate: false };
   });
   if (claim.duplicate) return { outcome: "duplicate", receiptId: receipt.id };
   if (busy) return { outcome: "busy", receiptId: receipt.id };
+  if (!dispatch) return { outcome: "observed", receiptId: receipt.id, ...diagnostics };
   const inputs = {
     wake_id: receipt.id,
     ...(signal.lane === "app" ? { dry_run: false } : { preview: false }),
@@ -317,13 +761,25 @@ async function handleWake({
       inputs,
     });
   } catch {
-    return { outcome: "uncertain", receiptId: receipt.id };
+    return { outcome: "uncertain", receiptId: receipt.id, ...diagnostics };
   }
   await store.update((state) => {
     const r = state.receipts[receipt.id];
     if (r.status === "intent") r.status = "sent";
     return { state };
   });
-  return { outcome: "dispatched", lane: signal.lane, receiptId: receipt.id };
+  return { outcome: "dispatched", lane: signal.lane, receiptId: receipt.id, ...diagnostics };
 }
-module.exports = { classifySignal, verifiedRun, verifyProducer, handleWake };
+module.exports = {
+  classifySignal,
+  verifiedRun,
+  verifyProducer,
+  handleWake,
+  alertWakeConfig,
+  verifyAlertCI,
+  mainQueueSignal,
+  appMergeSignal,
+  appMergeOwners,
+  interruptedAppSignal,
+  releasedAppSignal,
+};

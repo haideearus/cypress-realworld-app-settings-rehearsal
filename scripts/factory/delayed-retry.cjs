@@ -5,7 +5,7 @@ const HOLD_STEP = "Hold before Claude after a temporary GitHub gateway error";
 const MODEL_STEP = "Run the one reserved Claude subscription session";
 const DELAY_MS = 30 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
-const ordinary = (t) => t?.origin === "factory" && t.automatic && !t.finding && !t.monitor;
+const retryableTicket = (t) => t?.origin === "factory" && Boolean(t.automatic);
 
 function receipt(grantId, jobId, now = new Date()) {
   return { grantId, jobId, notBefore: new Date(now.getTime() + DELAY_MS).toISOString() };
@@ -16,11 +16,14 @@ function validate(ticket, grants) {
   if (r === undefined) return;
   const failed = grants.find((g) => g.id === r?.grantId);
   if (
-    !ordinary(ticket) ||
+    !retryableTicket(ticket) ||
     !r ||
-    !["grantId,jobId,notBefore", "grantId,jobId,notBefore,parent"].includes(
-      Object.keys(r).sort().join(",")
-    ) ||
+    ![
+      "grantId,jobId,notBefore",
+      "grantId,jobId,notBefore,parent",
+      "fix,grantId,jobId,notBefore",
+      "fix,grantId,jobId,notBefore,parent",
+    ].includes(Object.keys(r).sort().join(",")) ||
     !Number.isSafeInteger(r.jobId) ||
     r.jobId < 1 ||
     typeof r.notBefore !== "string" ||
@@ -34,6 +37,17 @@ function validate(ticket, grants) {
     failed.runAttempt !== ticket.automatic.runAttempt
   )
     throw Error("Invalid delayed retry failure evidence");
+  if (
+    r.fix !== undefined &&
+    (!r.fix ||
+      Object.keys(r.fix).sort().join(",") !== "ciRunId,mergeCommit,pr" ||
+      !Number.isSafeInteger(r.fix.pr) ||
+      r.fix.pr < 1 ||
+      !SHA.test(r.fix.mergeCommit || "") ||
+      typeof r.fix.ciRunId !== "string" ||
+      !/^[1-9]\d*$/.test(r.fix.ciRunId))
+  )
+    throw Error("Invalid verified fix evidence for delayed retry");
   if (r.parent === undefined) return;
   const parent = r.parent;
   if (
@@ -43,6 +57,7 @@ function validate(ticket, grants) {
     parent.runAttempt !== 1 ||
     parent.runId === failed.runId ||
     !SHA.test(parent.workflowSha || "") ||
+    (ticket.finding && ticket.finding.intake.head !== parent.workflowSha) ||
     !grants.some(
       (g) =>
         g.phase === "code" &&
@@ -57,13 +72,11 @@ function validate(ticket, grants) {
     throw Error("Invalid delayed retry handoff");
 }
 
-function due(state, ticket, id, config, now = new Date()) {
-  const r = ticket?.delayedRetry;
+function eligibleBlocked(state, ticket, id, config) {
   return Boolean(
     config.priorityRetry &&
-      ordinary(ticket) &&
-      r &&
-      r.parent === undefined &&
+      retryableTicket(ticket) &&
+      (!ticket.finding || config.discovery) &&
       ticket.status === "blocked" &&
       ticket.coding === 1 &&
       ticket.reviews === 0 &&
@@ -74,7 +87,17 @@ function due(state, ticket, id, config, now = new Date()) {
       !ticket.approval &&
       !slots.activeFor(state, id) &&
       ticket.coding < config.coding &&
-      ticket.retries < config.retries &&
+      require("./ticket-ai-budget.cjs").canReserve(ticket, "code", config) &&
+      ticket.retries < config.retries
+  );
+}
+
+function due(state, ticket, id, config, now = new Date()) {
+  const r = ticket?.delayedRetry;
+  return Boolean(
+    eligibleBlocked(state, ticket, id, config) &&
+      r &&
+      r.parent === undefined &&
       Date.parse(r.notBefore) <= now.getTime()
   );
 }
@@ -93,7 +116,8 @@ function handoff(state, request, config, now) {
     request.runId === ticket.automatic.runId ||
     request.phase !== "code" ||
     request.slot !== "cycle1" ||
-    request.head !== request.workflowSha
+    request.head !== request.workflowSha ||
+    (ticket.finding && ticket.finding.intake.head !== request.head)
   )
     throw Error("Delayed retry is not eligible for this run");
   ticket.delayedRetry.parent = {
@@ -130,4 +154,14 @@ async function failedJob(api, context) {
   return matchesStep(HOLD_STEP, "failure") && matchesStep(MODEL_STEP, "skipped") ? job.id : null;
 }
 
-module.exports = { HOLD_STEP, MODEL_STEP, receipt, validate, due, handoff, failedJob, ordinary };
+module.exports = {
+  HOLD_STEP,
+  MODEL_STEP,
+  receipt,
+  validate,
+  due,
+  eligibleBlocked,
+  handoff,
+  failedJob,
+  retryableTicket,
+};

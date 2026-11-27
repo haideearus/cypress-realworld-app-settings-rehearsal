@@ -9,6 +9,18 @@ const { Controller } = require("./controller.cjs");
 const { AutomaticMerger } = require("./merge.cjs");
 const { validateReview } = require("./artifacts.cjs");
 const { ConfirmationUnavailable, readMergePR } = require("./merge-confirmation.cjs");
+const mergeRetry = require("./dependency-merge-retry.cjs");
+const {
+  verifyAlertPR,
+  AlertAdmissionHold,
+  heldMergeAllowed,
+} = require("./dependency-alert-repair.cjs");
+
+class StaleDependencyBase extends Error {
+  constructor() {
+    super("Dependency PR requires a current-main rebase");
+  }
+}
 
 function expectedReport(ticket, context, stage) {
   const a = d.validateTicket(ticket);
@@ -27,29 +39,13 @@ function expectedReport(ticket, context, stage) {
 function artifactName(stage, context, ticket) {
   return `dependency-${stage}-${context.runId}-${context.runAttempt}-${ticket.pr}-${ticket.head}`;
 }
-async function trustedRun(api, context, historical = false) {
-  if (!d.contextOK(context)) throw new Error("Unauthorized dependency context");
+async function trustedRun(api, context, historicalTicket = null) {
+  const historical = historicalTicket !== null;
+  if (!historical && !d.contextOK(context)) throw new Error("Unauthorized dependency context");
   const run = await api.request(
     "GET",
     `${ROOT}/actions/runs/${context.runId}${historical ? `/attempts/${context.runAttempt}` : ""}`
   );
-  if (historical && run.actor?.login === "github-actions[bot]") {
-    await require("./trusted-wake.cjs").loadWakeContext(
-      api,
-      {
-        repository: policy.REPOSITORY,
-        actor: run.actor.login,
-        triggeringActor: run.triggering_actor?.login,
-        ref: "refs/heads/main",
-        event: run.event,
-        workflowRef: d.WORKFLOW,
-        workflowSha: run.head_sha,
-        runId: String(run.id),
-        runAttempt: run.run_attempt,
-      },
-      {}
-    );
-  }
   if (
     run.id !== Number(context.runId) ||
     run.path !== ".github/workflows/factory-dependencies.yml" ||
@@ -57,7 +53,7 @@ async function trustedRun(api, context, historical = false) {
     run.head_branch !== "main" ||
     run.repository?.full_name !== policy.REPOSITORY ||
     run.head_repository?.full_name !== policy.REPOSITORY ||
-    ((!historical || run.actor?.login !== "github-actions[bot]") &&
+    (!historical &&
       (run.actor?.login !== context.actor ||
         run.triggering_actor?.login !== context.triggeringActor)) ||
     run.run_attempt !== context.runAttempt ||
@@ -66,6 +62,23 @@ async function trustedRun(api, context, historical = false) {
       : run.event === context.event)
   )
     throw new Error("Dependency producer run identity changed");
+  if (historical) {
+    const owner = [run.actor, run.triggering_actor].every((actor) => actor?.login === policy.OWNER);
+    if (!owner) {
+      const { verifyPreparationOrigin } = require("./trusted-wake.cjs");
+      const { WakeStore } = require("./wake-store.cjs");
+      if (
+        !(await verifyPreparationOrigin(
+          api,
+          run,
+          historicalTicket,
+          d.validateTicket(historicalTicket),
+          new WakeStore(api)
+        ))
+      )
+        throw new Error("Unauthorized dependency producer");
+    }
+  }
   return run;
 }
 async function producer(api, context, ticket, report, stage) {
@@ -106,17 +119,96 @@ class DependencyCoordinator {
     policy.authorize(this.context);
     if (!d.contextOK(this.context)) throw new Error("Unauthorized dependency context");
   }
-  async pending(t, preview) {
+  async alertHold(t, pr) {
+    if (!d.alertKey(t.branch) || t.merge || pr.state !== "open") return null;
+    if (!this.config.alertRepair) return "alert-repair-disabled";
+    if (pr.head.sha === t.head) {
+      const main = await this.api.request("GET", `${ROOT}/git/ref/heads/main`);
+      if (!d.SHA.test(main.object?.sha || "")) throw Error("Invalid main revision");
+      if (main.object.sha !== d.validateTicket(t).base) return "stale-base";
+    }
+    try {
+      await verifyAlertPR(this.api, pr, this.config);
+    } catch (error) {
+      if (!(error instanceof AlertAdmissionHold)) throw error;
+      return "ticket-held";
+    }
+    return null;
+  }
+  async pending(t, preview, now = new Date()) {
+    if (!t.merge && mergeRetry.current(t)?.phase === "retrying")
+      return { ready: false, reason: "Dependency merge retry is already claimed" };
+    if (!preview && !t.merge && mergeRetry.due(t, now)) {
+      if (!(await mergeRetry.claim(this.ledger, t, this.context, this.config, now)))
+        return { ready: false, reason: "Dependency merge retry is already claimed or unavailable" };
+      return { ready: true, mode: "merge", ticket: t.pr, head: t.head };
+    }
     let observed;
     try {
-      observed = d.prOK(await readMergePR(this.api, t.pr, t.merge?.status === "intent"), true);
+      observed = d.prOK(
+        await readMergePR(this.api, t.pr, t.merge?.status === "intent"),
+        true,
+        d.alertKey(t.branch) ? { ...this.config, alertRepair: true } : this.config
+      );
     } catch (error) {
       if (!(error instanceof ConfirmationUnavailable)) throw error;
       return { ready: false, reason: "merge_confirmation_unavailable" };
     }
     if (observed.number !== t.pr || observed.head.ref !== t.branch)
       throw new Error("Dependency PR identity changed");
-    if (observed.head.sha !== t.head) {
+    const alertHold = await this.alertHold(t, observed);
+    if (alertHold) {
+      if (preview) return { ready: false, reason: alertHold };
+      await this.ledger.update(async (s) => {
+        policy.assertNotStopped(s);
+        const current = s.tickets[String(t.pr)];
+        const entry = slots.activeFor(s, t.pr);
+        if (
+          JSON.stringify(current) !== JSON.stringify(t) ||
+          Object.values(s.grants).some((g) => g.ticket === t.pr && g.status === "reserved") ||
+          (entry && !(await terminalParent(this.api, entry)))
+        )
+          throw Error("Alert proposal history changed");
+        const latest = d.prOK(await readMergePR(this.api, t.pr), true, {
+          ...this.config,
+          alertRepair: true,
+        });
+        if (
+          latest.number !== t.pr ||
+          latest.head.ref !== t.branch ||
+          latest.head.sha !== observed.head.sha ||
+          (await this.alertHold(t, latest)) !== alertHold
+        )
+          throw Error("Alert proposal changed during hold");
+        policy.audit(s, "dependency_alert_approval_retired", {
+          ticket: t.pr,
+          head: t.head,
+          grant: t.approval?.grant,
+          reason: alertHold,
+        });
+        current.status = "blocked";
+        current.approval = null;
+        if (entry) slots.releaseActive(s, entry);
+        return { state: s };
+      });
+      return null;
+    }
+    let checked;
+    let staleBase = false;
+    if (
+      observed.state === "open" &&
+      observed.head.sha === t.head &&
+      d.branch(t.branch) &&
+      !t.merge
+    ) {
+      try {
+        checked = await this.pr(t.pr, { expected: t });
+      } catch (error) {
+        if (!(error instanceof StaleDependencyBase)) throw error;
+        staleBase = true;
+      }
+    }
+    if (observed.head.sha !== t.head || staleBase) {
       if (t.merge?.status === "intent")
         return {
           ready: false,
@@ -128,10 +220,12 @@ class DependencyCoordinator {
           mode: "preview",
           ticket: t.pr,
           head: observed.head.sha,
-          reason: "Bot changed reviewed head; live intake must invalidate stale approval",
+          reason: staleBase
+            ? "Reviewed Dependabot PR needs a refresh on current main"
+            : "Bot changed reviewed head; live intake must invalidate stale approval",
         };
-      // Without a merge intent this is a new candidate head. An uncertain merge
-      // was handled above and must never retire its approval on this path.
+      // The old approval is stale after a head or base change. An uncertain
+      // merge must keep its approval for reconciliation.
       if (observed.state !== "open")
         return {
           ready: false,
@@ -153,19 +247,35 @@ class DependencyCoordinator {
           (entry && (!slots.owns(entry, expectedOwner) || !(await terminalParent(this.api, entry))))
         )
           throw new Error("Dependency history changed during stale-proof reconciliation");
-        const latest = d.prOK(await this.api.request("GET", `${ROOT}/pulls/${t.pr}`));
+        const latest = d.prOK(
+          await this.api.request("GET", `${ROOT}/pulls/${t.pr}`),
+          false,
+          this.config
+        );
+        await verifyAlertPR(this.api, latest, this.config);
         if (
           latest.number !== t.pr ||
           latest.head.ref !== t.branch ||
           latest.head.sha !== observed.head.sha ||
-          latest.head.sha === t.head
+          latest.base.sha !== observed.base.sha
         )
-          throw new Error("Dependency bot head changed during reconciliation");
+          throw new Error("Dependency bot candidate changed during reconciliation");
+        if (staleBase) {
+          let stillStale = false;
+          try {
+            await this.pr(t.pr, { expected: t });
+          } catch (error) {
+            if (!(error instanceof StaleDependencyBase)) throw error;
+            stillStale = true;
+          }
+          if (!stillStale) throw new Error("Dependency base changed during reconciliation");
+        }
         policy.audit(s, "dependency_stale_approval_retired", {
           ticket: t.pr,
           head: t.head,
           observedHead: latest.head.sha,
           grant: t.approval?.grant,
+          ...(staleBase ? { reason: "stale-base" } : {}),
           ...(t.merge ? { mergeIntent: t.merge } : {}),
         });
         current.status = "blocked";
@@ -178,7 +288,7 @@ class DependencyCoordinator {
     }
     if (t.merge?.status === "intent")
       return { ready: !preview, mode: "reconcile", ticket: t.pr, head: t.head };
-    const pr = await this.pr(t.pr, { closed: true, expected: t });
+    const pr = checked ?? (await this.pr(t.pr, { closed: true, expected: t }));
     return {
       ready: !preview,
       mode: pr.state === "closed" ? "reconcile" : "merge",
@@ -188,30 +298,39 @@ class DependencyCoordinator {
   }
   async pr(number, { closed = false, expected, confirmation = false } = {}) {
     if (!Number.isSafeInteger(number) || number < 1) throw new Error("Invalid dependency PR");
-    const pr = d.prOK(await readMergePR(this.api, number, confirmation), closed);
+    const observed = await readMergePR(this.api, number, confirmation);
+    const reconciling = confirmation && expected?.merge?.status === "intent";
+    const config =
+      expected && (reconciling || (closed && observed.state === "closed"))
+        ? { ...this.config, alertRepair: true }
+        : this.config;
+    const pr = d.prOK(observed, closed, config);
     if (
       pr.number !== number ||
       (expected && (pr.head.sha !== expected.head || pr.head.ref !== expected.branch))
     )
       throw new Error("Dependency head changed");
+    const receipt = await verifyAlertPR(this.api, pr, config, undefined, reconciling);
+    const base = receipt?.base ?? pr.base.sha;
     if (pr.state === "open" && !confirmation) {
-      d.filesOK(await this.api.request("GET", `${ROOT}/pulls/${number}/files?per_page=3`));
+      if (base === pr.base.sha)
+        d.alertFilesOK(
+          await this.api.request("GET", `${ROOT}/pulls/${number}/files?per_page=3`),
+          receipt
+        );
       const main = await this.api.request("GET", `${ROOT}/git/ref/heads/main`);
-      const compare = await this.api.request(
-        "GET",
-        `${ROOT}/compare/${pr.base.sha}...${pr.head.sha}`
-      );
+      const compare = await this.api.request("GET", `${ROOT}/compare/${base}...${pr.head.sha}`);
       if (
-        main.object?.sha !== pr.base.sha ||
+        main.object?.sha !== base ||
         compare.behind_by !== 0 ||
-        compare.merge_base_commit?.sha !== pr.base.sha ||
-        (expected && pr.base.sha !== d.validateTicket(expected).base)
+        compare.merge_base_commit?.sha !== base ||
+        (expected && base !== d.validateTicket(expected).base)
       )
-        throw new Error("Dependency PR requires a current-main rebase");
+        throw new StaleDependencyBase();
     }
-    return pr;
+    return base === pr.base.sha ? pr : { ...pr, base: { ...pr.base, sha: base } };
   }
-  async select(preview = true) {
+  async select(preview = true, now = new Date()) {
     this.authorize();
     if (typeof preview !== "boolean") throw new Error("Invalid dependency preview");
     if (!preview && (!this.config.enabled || !this.config.automatic))
@@ -234,10 +353,11 @@ class DependencyCoordinator {
         state.version === 2 &&
         t?.dependency &&
         t.status === "reviewed" &&
+        mergeRetry.blocksQueue(t, now) &&
         !["closed", "merged"].includes(t.merge?.status) &&
         (await terminalParent(this.api, entry))
       ) {
-        const result = await this.pending(t, preview);
+        const result = await this.pending(t, preview, now);
         if (result) return result;
         state = (await this.ledger.read()).state;
       }
@@ -259,7 +379,7 @@ class DependencyCoordinator {
           runId: attempt.runId,
           runAttempt: attempt.runAttempt,
         };
-        const run = await trustedRun(this.api, original, true);
+        const run = await trustedRun(this.api, original, t);
         if (run.status === "completed") {
           await this.ledger.update((s) => ({
             state: lifecycle.finishPreparation(s, t.pr, original),
@@ -273,8 +393,12 @@ class DependencyCoordinator {
     const pending = Object.values(state.tickets).find(
       (t) =>
         (t.automatic || t.dependency) &&
+        (!t.feature || slots.activeFor(state, t.feature.issue)) &&
         !t.findingApiRecovery &&
         t.status === "reviewed" &&
+        (!t.dependency ||
+          mergeRetry.blocksQueue(t, now) ||
+          (this.config.autoMerge && mergeRetry.due(t, now))) &&
         !["closed", "merged"].includes(t.merge?.status)
     );
     if (pending) {
@@ -282,25 +406,33 @@ class DependencyCoordinator {
         return { ready: false, reason: "Pending app merge must be reconciled" };
       if (state.version === 2 && slots.activeFor(state, pending.pr))
         return { ready: false, reason: "Reviewed dependency parent is still running" };
-      const result = await this.pending(pending, preview);
+      const result = await this.pending(pending, preview, now);
       if (result) return result;
       state = (await this.ledger.read()).state;
     }
-    let candidate;
+    const target = require("./trusted-wake.cjs").dependencyWakeTarget(this.context);
+    const turns = require("./feature-turn.cjs");
+    if (turns.priority(state, this.config)) return { ready: false, reason: turns.WAITING };
+    if (this.context.wake && !target)
+      return { ready: false, reason: "No exact dependency CI wake for a new review" };
+    let candidate, generated;
     const holds = [];
     for (let page = 1; page <= 5 && !candidate; page++) {
-      const rows = await this.api.request(
-        "GET",
-        `${ROOT}/pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=${page}`
-      );
+      const rows = target
+        ? [await readMergePR(this.api, target.number)]
+        : await this.api.request(
+            "GET",
+            `${ROOT}/pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=${page}`
+          );
       if (!Array.isArray(rows) || rows.length > 100)
         throw new Error("Invalid bounded dependency queue");
       for (const row of rows) {
         try {
-          d.prOK(row);
+          d.prOK(row, false, this.config);
         } catch {
           continue;
         }
+        if (target && (row.number !== target.number || row.head.sha !== target.head)) continue;
         const previous = state.tickets[String(row.number)];
         if (slots.activeFor(state, row.number)) continue;
         if (
@@ -313,8 +445,23 @@ class DependencyCoordinator {
         )
           continue;
         try {
-          candidate = await this.pr(row.number);
-          break;
+          if (generated && d.alertKey(row.head.ref)) continue;
+          const verified = await this.pr(row.number);
+          if (target && verified.head.sha !== target.head) continue;
+          if (d.alertKey(row.head.ref)) {
+            if (
+              !(await heldMergeAllowed(
+                this.api,
+                { branch: verified.head.ref, head: verified.head.sha, pr: verified.number },
+                state
+              ))
+            )
+              continue;
+            generated = verified;
+          } else {
+            candidate = verified;
+            break;
+          }
         } catch (error) {
           if (holds.length < 5)
             holds.push({
@@ -329,6 +476,18 @@ class DependencyCoordinator {
       }
       if (rows.length < 100) break;
     }
+    if (
+      !candidate &&
+      generated &&
+      !(await new (require("./automation.cjs").AutomaticCoordinator)(
+        this.api,
+        this.config,
+        {}
+      ).candidate(state))
+    )
+      candidate = generated;
+    if (!candidate && generated)
+      return { ready: false, reason: "App work takes priority over dependency alert repair" };
     if (!candidate)
       return holds.length
         ? {
@@ -338,7 +497,7 @@ class DependencyCoordinator {
             holds,
             reason: "Dependabot proposals held; refresh or prerequisite verification required",
           }
-        : { ready: false, reason: "No eligible Dependabot PR in the bounded queue" };
+        : { ready: false, reason: "No eligible dependency PR in the bounded queue" };
     if (preview)
       return {
         ready: false,
@@ -347,14 +506,31 @@ class DependencyCoordinator {
         head: candidate.head.sha,
         reason: "Preview only; no reservation, model session or merge",
       };
-    await this.ledger.update(async (s) => ({
-      state: lifecycle.claimDependency(
-        s,
-        await this.pr(candidate.number),
-        this.context,
-        this.config
-      ),
-    }));
+    await this.ledger.update(async (s) => {
+      const pr = await this.pr(candidate.number);
+      const receipt = await verifyAlertPR(this.api, pr, this.config);
+      if (
+        receipt &&
+        !(await heldMergeAllowed(
+          this.api,
+          { branch: pr.head.ref, head: pr.head.sha, pr: pr.number },
+          s
+        ))
+      )
+        throw Error("Daily held dependency merge limit reached");
+      if (
+        receipt &&
+        (await new (require("./automation.cjs").AutomaticCoordinator)(
+          this.api,
+          this.config,
+          {}
+        ).candidate(s))
+      )
+        throw Error("App work takes priority over dependency alert repair");
+      return {
+        state: lifecycle.claimDependency(s, pr, this.context, this.config, new Date(), receipt),
+      };
+    });
     return { ready: true, mode: "review", ticket: candidate.number, head: candidate.head.sha };
   }
   async ticket(number, active = true) {
@@ -383,13 +559,20 @@ class DependencyCoordinator {
     });
     return { passed: true, ticket: number, head: t.head };
   }
-  async reserve(number) {
+  async reserve(number, packet) {
     const t = await this.ticket(number);
-    if (!(await this.controller.validateCI(t.ci?.runId, t.head, t.ci)).passed)
+    const { verifyPacket } = require("./dependency-preflight.cjs");
+    verifyPacket(t, packet);
+    if (
+      !(await this.controller.validateCI(t.ci.runId, t.head, t.ci, packet.ciEvidence.runAttempt))
+        .passed
+    )
       throw new Error("Dependency CI failed");
-    const result = await this.ledger.update((s) =>
-      lifecycle.reserveDependencyReview(s, this.context, this.config)
-    );
+    const result = await this.ledger.update((s) => {
+      this.controller.activeRun(s, number);
+      verifyPacket(s.tickets[String(number)], packet);
+      return lifecycle.reserveDependencyReview(s, this.context, this.config);
+    });
     return this.controller.result(result.grant);
   }
   async assess(number, grantId, bundle) {
@@ -419,15 +602,30 @@ class DependencyCoordinator {
     const gate = await this.controller.gate(number);
     return { reviewed: review.verdict === "pass" && gate.ok, ticket: number, head: t.head };
   }
-  async finalize(number) {
+  async finalize(number, outcome = {}) {
     this.authorize();
     const { state } = await this.ledger.read();
+    if (
+      outcome.premergeFailed === true &&
+      (await mergeRetry.premergeFailed(
+        this.ledger,
+        state.tickets[number],
+        this.context,
+        outcome.head,
+        outcome.premergeEvidence
+      ))
+    )
+      return {
+        reason: "Dependency premerge failed before sending a merge request; approval retained",
+      };
+    if (await mergeRetry.finish(this.ledger, state.tickets[number], this.context))
+      return { reason: "Dependency merge retry ended before a merge was sent; approval retained" };
     if (!slots.owns(slots.activeFor(state, number), { ...this.context, ticket: number }))
       return { reason: "No preparation lease owned by this run" };
     const t = state.tickets[String(number)];
-    d.matches(t, this.context, this.config);
     if (t.status === "reviewed" || t.merge)
       return { reason: "Reviewed or merge-intent history preserved" };
+    d.matches(t, this.context, this.config);
     if (Object.values(state.grants).some((g) => g.ticket === number && g.status === "reserved"))
       return this.controller.block(
         number,
@@ -471,7 +669,12 @@ class DependencyMerger extends AutomaticMerger {
   }
   async permitWrite(number, t) {
     await this.pr(number, t);
+    const { state } = await this.ledger.read();
+    if (!(await heldMergeAllowed(this.api, t, state)))
+      throw Error("Daily held dependency merge limit reached");
     analysis.validateReport(this.report, expectedReport(t, this.context, "premerge"));
+    if (!mergeRetry.permits(state.tickets[number], this.context))
+      throw Error("Dependency merge retry ownership or time window ended");
   }
   async pr(number, t, { confirmation = false } = {}) {
     const pr = await this.coordinator.pr(number, { closed: true, expected: t, confirmation });
@@ -480,15 +683,74 @@ class DependencyMerger extends AutomaticMerger {
       analysis.validateReport(this.report, expectedReport(t, this.context, "premerge"));
     return pr;
   }
+  async recheck(stage, check) {
+    try {
+      return await check();
+    } catch (error) {
+      throw new mergeRetry.MergeCheckFailure(stage, error);
+    }
+  }
+  authorizeNewIntent(ticket) {
+    if (!mergeRetry.permits(ticket, this.context))
+      throw Error("Dependency merge retry ownership or time window ended");
+  }
+  unsentFailure(ticket, intent, error) {
+    return mergeRetry.recordUnsent(ticket, intent, error);
+  }
+  async release(ticket, expected, intent, error) {
+    try {
+      return await super.release(ticket, expected, intent, error);
+    } catch (cause) {
+      if (!(error instanceof mergeRetry.MergeCheckFailure)) throw cause;
+      error.ledgerDiagnostic = mergeRetry.describe(cause, "ledger");
+      throw error;
+    }
+  }
   async merge(number, options) {
     this.authorize();
     if (!this.enabled()) return { merged: false, reason: "Dependency merge disabled" };
     const { state } = await this.ledger.read();
     const t = this.automaticTicket(state, number);
     if (t.merge?.status === "intent") return super.merge(number, options);
-    const pr = await this.coordinator.pr(number, { closed: true, expected: t });
-    if (pr.state === "open") await producer(this.api, this.context, t, this.report, "premerge");
-    return super.merge(number, options);
+    let evidenceChecked = false;
+    try {
+      const pr = await this.recheck("pr-identity", () =>
+        this.coordinator.pr(number, { closed: true, expected: t })
+      );
+      if (pr.state === "open") {
+        if (!mergeRetry.permits(t, this.context))
+          return {
+            ticket: number,
+            merged: false,
+            reason: "Dependency merge retry is waiting or held",
+          };
+        if (
+          !(await this.recheck("dependency-evidence", () => heldMergeAllowed(this.api, t, state)))
+        )
+          return {
+            ticket: number,
+            merged: false,
+            reason: "Daily held dependency merge limit reached",
+          };
+        await this.recheck("dependency-evidence", () =>
+          producer(this.api, this.context, t, this.report, "premerge")
+        );
+        evidenceChecked = true;
+      }
+      return await super.merge(number, options);
+    } catch (error) {
+      if (!options?.dryRun && this.report && !error?.ledgerDiagnostic) {
+        try {
+          await mergeRetry.initialFailure(this.ledger, t, this.context, error, {
+            temporaryOnly: !evidenceChecked,
+          });
+        } catch (cause) {
+          if (!(error instanceof mergeRetry.MergeCheckFailure)) throw cause;
+          error.ledgerDiagnostic = mergeRetry.describe(cause, "ledger");
+        }
+      }
+      throw error;
+    }
   }
 }
 module.exports = {

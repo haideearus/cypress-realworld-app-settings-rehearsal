@@ -122,6 +122,80 @@ test("disabled pickup returns before network access and creates no reservation",
   }
 });
 
+test("ordinary automatic pickup yields without reserving when a feature turn is waiting", async () => {
+  const { coordinator, config, ledger } = await setup({ FACTORY_FEATURE_MODE: "live" });
+  await ledger.update((state) => {
+    require("../factory/feature-turn.cjs").enqueue(state, config, "300");
+    return { state };
+  });
+  const result = await coordinator.pick();
+  assert.equal(result.ready, false);
+  assert.match(result.reason, /feature turn is next/);
+  assert.deepEqual((await ledger.read()).state.grants, {});
+});
+
+test("a verified ready feature goes before an ordinary repair and consumes its turn", async () => {
+  const s = await setup({ FACTORY_FEATURE_MODE: "pilot" });
+  const c = require("../factory/feature-contract.cjs");
+  const turns = require("../factory/feature-turn.cjs");
+  const proposal = require("../factory/feature-planner.cjs").PILOT;
+  const key = c.proposalKey(proposal);
+  const row = {
+    week: c.weekKey(new Date()),
+    producer: { mode: "pilot", head, runId: "300" },
+    proposal,
+    parent: null,
+    stages: [{ phase: "ready", issue: 75 }],
+  };
+  s.fixture.issues.set(
+    75,
+    issue(75, {
+      ...c.issueFields(key, row, 0),
+      user: c.BOT,
+      created_at: "2026-11-24T10:00:00Z",
+    })
+  );
+  const request = s.api.request.bind(s.api);
+  s.api.request = (method, path, body) => {
+    if (path.endsWith("/git/ref/heads/factory/features")) return { object: { sha: head } };
+    if (path.includes("/contents/features.json?")) {
+      const state = { ...c.emptyRegistry(), records: { [key]: row } };
+      return {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(state)).toString("base64"),
+      };
+    }
+    return request(method, path, body);
+  };
+  s.api.pages = async (path) =>
+    path.includes("factory-ci.yml/runs?")
+      ? [
+          {
+            id: 900,
+            run_attempt: 1,
+            head_sha: head,
+            head_branch: "main",
+            event: "push",
+            path: ".github/workflows/factory-ci.yml",
+            status: "completed",
+            conclusion: "success",
+            repository: { full_name: policy.REPOSITORY },
+          },
+        ]
+      : [{ name: "verify", head_sha: head, conclusion: "success" }];
+  await s.ledger.update((state) => {
+    turns.enqueue(state, s.config, "300");
+    turns.update(state, "300", { ticket: 75 });
+    return { state };
+  });
+  assert.equal((await s.coordinator.pick()).ticket, 75);
+  const { state } = await s.ledger.read();
+  assert.equal(state.active.ticket, 75);
+  assert.equal(state.featureTurn.status, "finished");
+  assert.equal(state.tickets["10"], undefined);
+});
+
 test("explicit preview while disabled selects a proposal without writing or granting", async () => {
   const { coordinator, ledger, fixture } = await setup({
     FACTORY_ENABLED: "false",
@@ -335,4 +409,123 @@ test("disabled automatic CLI does not need a GitHub token and still rejects paid
     implementation.main({ ...env, ANTHROPIC_API_KEY: "fixture-not-real" }),
     /subscription/i
   );
+});
+test("a labeled feature is ignored until its exact receipt is ready and a due repair wins", async () => {
+  const c = require("../factory/feature-contract.cjs");
+  const { PILOT } = require("../factory/feature-planner.cjs");
+  const s = await setup({ FACTORY_FEATURE_MODE: "pilot", FACTORY_PRIORITY_RETRY_ENABLED: "true" });
+  const key = c.proposalKey(PILOT);
+  const row = {
+    week: "2026-11-23",
+    producer: { mode: "pilot", head, runId: "120" },
+    proposal: PILOT,
+    parent: null,
+    stages: [{ phase: "created", issue: 11 }],
+  };
+  const published = issue(11, { user: c.BOT, ...c.issueFields(key, row, 0) });
+  s.fixture.issues = new Map([[11, published]]);
+  const metadataCommit = "a".repeat(40);
+  const request = s.api.request.bind(s.api);
+  s.api.request = (method, route, body) => {
+    if (route.endsWith("/git/ref/heads/factory/features"))
+      return { object: { sha: metadataCommit } };
+    if (route.endsWith("/contents/features.json?ref=" + metadataCommit)) {
+      const registry = { version: 1, records: { [key]: row } };
+      return {
+        type: "file",
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(registry)).toString("base64"),
+      };
+    }
+    if (route.endsWith("/pulls?state=open&base=main&per_page=100&page=1")) return [];
+    return request(method, route, body);
+  };
+  assert.equal((await s.coordinator.pick({ dryRun: true })).ticket, undefined);
+  row.stages[0].phase = "ready";
+  s.fixture.issues.set(10, issue(10));
+  assert.equal((await s.coordinator.pick({ dryRun: true })).ticket, 10);
+  s.fixture.issues.delete(10);
+  const delayedCandidate = s.coordinator.delayedCandidate.bind(s.coordinator);
+  s.coordinator.delayedCandidate = async (state, options) =>
+    options ? delayedCandidate(state, options) : issue(10);
+  const repair = await s.coordinator.pick({ dryRun: true });
+  assert.equal(repair.ticket, 10);
+  assert.equal(repair.delayedRetry, true);
+  s.coordinator.delayedCandidate = delayedCandidate;
+  published.body += "\nUntrusted change";
+  assert.equal((await s.coordinator.pick({ dryRun: true })).ticket, undefined);
+  published.body = c.issueFields(key, row, 0).body;
+  const assigned = await s.coordinator.pick();
+  assert.equal(assigned.ticket, 11);
+  assert.deepEqual((await s.ledger.read()).state.tickets[11].feature, c.receiptFor(key, row, 0));
+});
+test("mode-off reviewed features do not block ordinary or dependency repairs in either ledger version", async () => {
+  for (const version of [1, 2]) {
+    const s = await setup(version === 2 ? { FACTORY_MAX_CONCURRENT_TICKETS: "2" } : {});
+    if (version === 2) {
+      await s.ledger.update((state) => {
+        state.version = 2;
+        delete state.active;
+        state.activeTickets = {};
+        return { state };
+      });
+    }
+    await reviewedAutomatic(s);
+    await s.ledger.update((state) => {
+      const t = state.tickets[10];
+      t.feature = {
+        mode: "pilot",
+        issue: 10,
+        index: 0,
+        criteriaHash: t.criteriaHash,
+        key: "a".repeat(64),
+        head,
+        runId: "120",
+      };
+      if (version === 2)
+        state.activeTickets[10] = { ticket: 10, runId: automaticContext.runId, runAttempt: 1 };
+      return { state };
+    });
+    s.fixture.issues.set(11, issue(11));
+    const original = s.api.request.bind(s.api);
+    s.api.request = (method, route, body) =>
+      route.endsWith("/runs/100/attempts/1")
+        ? { id: 100, run_attempt: 1, status: "completed" }
+        : original(method, route, body);
+    const selected = await s.coordinator.pick();
+    assert.equal(selected.ticket, 11);
+    assert.equal(selected.ready, true);
+    const { state } = await s.ledger.read();
+    const owners = require("../factory/active-tickets.cjs").activeEntries(state);
+    assert.deepEqual(
+      owners.map((owner) => owner.ticket),
+      [11]
+    );
+    assert.equal(state.tickets[10].status, "reviewed");
+    assert.equal(state.tickets[10].merge, undefined);
+    assert.equal(require("../factory/dependency-policy.cjs").pending(state, 11), false);
+  }
+});
+
+test("a recorded feature merge intent must reconcile even after mode-off", async () => {
+  const s = await setup();
+  await reviewedAutomatic(s, "intent");
+  await s.ledger.update((state) => {
+    const t = state.tickets[10];
+    t.feature = {
+      mode: "pilot",
+      issue: 10,
+      index: 0,
+      criteriaHash: t.criteriaHash,
+      key: "a".repeat(64),
+      head,
+      runId: "120",
+    };
+    return { state };
+  });
+  s.fixture.issues.set(11, issue(11));
+  const result = await s.coordinator.pick();
+  assert.equal(result.kind, "merge");
+  assert.equal(result.ticket, 10);
+  assert.equal((await s.ledger.read()).state.tickets[10].merge.status, "intent");
 });

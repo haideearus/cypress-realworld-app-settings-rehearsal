@@ -4,6 +4,7 @@ const { GitHub, ROOT } = require("./github.cjs");
 const { REPOSITORY, OWNER, SHA, assertSubscriptionEnv } = require("./policy.cjs");
 const { MonitorStore, MAX_INCIDENTS, MAX_CREATIONS_PER_DAY } = require("./monitor-state.cjs");
 const { MONITOR_WORKFLOW } = require("./monitor-origin.cjs");
+const { SCHEDULED_KIND } = require("./monitor-ack-contract.cjs");
 const { probeApp } = require("./monitor-probe.cjs");
 const { publisherFetch } = require("./app-checks-budget.cjs");
 const {
@@ -92,6 +93,80 @@ async function monitor({
   if (dryRun) return { outcome: "preview", observation };
   return observeIncident({ api, context, store, observation, now, verifiedRetirement: true });
 }
+async function recordBlockedRecovery({
+  api,
+  context,
+  store,
+  state,
+  commit,
+  incident,
+  issue,
+  observation,
+  at,
+  now,
+}) {
+  if (incident.probeMode !== "feed-contract" || context.eventName !== "schedule") return null;
+  const closure = await require("./monitor-scheduled-recovery.cjs")
+    .closeBlockedRepair({
+      api,
+      context,
+      store,
+      state,
+      commit,
+      incident,
+      issue,
+      observation,
+      at,
+      now,
+    })
+    .catch(() => ({
+      outcome: "blocked_repair_recovery_held",
+      issue: incident.issue,
+      observation,
+      reason: "Scheduled recovery evidence changed or closure is unconfirmed",
+    }));
+  if (closure?.outcome) return closure;
+  const recovery = await require("./monitor-blocked-recovery.cjs")
+    .observeBlockedRepair({
+      api,
+      context,
+      incident,
+      issue,
+      observation,
+      at,
+    })
+    .catch(() => null);
+  const deferred = closure?.deferred;
+  if (!recovery && !deferred) return null;
+  if (recovery && (recovery !== incident.blockedRecovery || !incident.recovered)) {
+    incident.recovered = true;
+    incident.blockedRecovery = recovery;
+    await store.save(state, commit);
+  }
+  if (deferred)
+    return {
+      outcome: "blocked_repair_recovery_held",
+      issue: incident.issue,
+      observation,
+      reason: deferred,
+      ...(recovery ? { recovery } : {}),
+    };
+  const ready = recovery?.observations.length === 2;
+  let nextAction = "Wait for another scheduled production monitor observation on the same release.";
+  if (ready)
+    nextAction =
+      incident.acknowledgment?.kind === "owner-observed-recovery"
+        ? "Rerun the owner acknowledgment with fresh evidence to complete the saved owner decision."
+        : "Wait for the scheduled production monitor to verify both completed runs on the live release.";
+  return {
+    outcome: ready ? "blocked_repair_recovery_ready" : "blocked_repair_recovery_observed",
+    issue: incident.issue,
+    incident: incident.id,
+    observation,
+    recovery,
+    nextAction,
+  };
+}
 async function observeIncident({
   api,
   context,
@@ -102,6 +177,8 @@ async function observeIncident({
   labels = ["factory-ready"],
   verifiedRetirement = false,
   probeMode,
+  functionalChecks,
+  functionalPassed = [],
 }) {
   const f = require("./functional-discovery-contract.cjs");
   const functional = probeMode === f.PROBE_MODE;
@@ -124,10 +201,55 @@ async function observeIncident({
     throw new Error("Invalid monitor time");
   const { state, commit } = await store.read();
   let active = state.active && state.incidents[state.active];
+  if (
+    active &&
+    functional &&
+    active.probeMode === f.PROBE_MODE &&
+    functionalChecks &&
+    !functionalChecks.includes(active.functionalCheck)
+  )
+    return { outcome: "required_probe_missing", issue: active.issue, observation };
   if (active?.phase === "pending")
     return { outcome: "publication_needs_owner_recovery", incident: active.id, observation };
-  if (active?.acknowledgment?.phase === "intent")
+  if (active?.acknowledgment?.phase === "intent") {
+    const scheduled = active.acknowledgment.kind === SCHEDULED_KIND;
+    if (active.acknowledgment.blockedRecovery) {
+      if (!observation.healthy && active.blockedRecovery) {
+        delete active.blockedRecovery;
+        active.recovered = false;
+        await store.save(state, commit);
+      } else if (
+        context.eventName === "schedule" &&
+        observation.healthy &&
+        (scheduled ||
+          active.blockedRecovery?.observations.length !== 2 ||
+          active.blockedRecovery.observations.at(-1).release !== observation.release)
+      ) {
+        const issue = await api.request("GET", ROOT + "/issues/" + active.issue);
+        const result = await recordBlockedRecovery({
+          api,
+          context,
+          store,
+          state,
+          commit,
+          incident: active,
+          issue,
+          observation,
+          at,
+          now,
+        });
+        if (result) return result;
+      }
+    }
+    if (scheduled)
+      return {
+        outcome: "blocked_repair_recovery_held",
+        issue: active.issue,
+        observation,
+        reason: "Fresh scheduled feed-contract evidence or confirmed closure is unavailable",
+      };
     return { outcome: "acknowledgment_needs_owner_recovery", issue: active.issue, observation };
+  }
   let issue;
   if (active) {
     issue = await api.request("GET", `${ROOT}/issues/${active.issue}`);
@@ -140,27 +262,26 @@ async function observeIncident({
     if (
       (active.probeMode === f.PROBE_MODE) !== functional ||
       (active.probeMode === "feed-contract" && observation.appChecks?.feedContract === undefined)
-    )
+    ) {
+      if (!observation.healthy && !functional && active.blockedRecovery) {
+        delete active.blockedRecovery;
+        active.recovered = false;
+        await store.save(state, commit);
+      }
       return { outcome: "required_probe_missing", issue: active.issue, observation };
+    }
+    // A different confirmed failure can coexist with two passing rechecks
+    // of the active incident. Recover only the incident actually rechecked.
+    if (functional && functionalPassed.includes(active.functionalCheck)) observation.healthy = true;
     const changedAssertion =
       functional &&
       !observation.healthy &&
       (active.functionalCheck !== observation.check ||
         active.functionalAssertion !== observation.assertion);
-    if (
-      functional &&
-      issue.state === "closed" &&
-      !observation.healthy &&
-      (active.recovered || changedAssertion)
-    ) {
-      active.recovered = true;
+    if (functional && issue.state === "closed" && !observation.healthy && active.recovered) {
       state.active = null;
       active = null;
     } else if (changedAssertion) {
-      if (!active.recovered) {
-        active.recovered = true;
-        await store.save(state, commit);
-      }
       return { outcome: "another_functional_incident_active", issue: active.issue, observation };
     }
   }
@@ -182,9 +303,24 @@ async function observeIncident({
         // was reviewed, approved, deployed and observed on its required probes.
         const latest = await store.read();
         const held = latest.state.incidents[active.id];
-        if (latest.state.active === active.id && held && !held.retirement && !held.recovered) {
-          held.recovered = true;
-          await store.save(latest.state, latest.commit);
+        if (latest.state.active === active.id && held && !held.retirement && !held.acknowledgment) {
+          const recovery = await recordBlockedRecovery({
+            api,
+            context,
+            store,
+            ...latest,
+            incident: held,
+            issue,
+            observation,
+            at,
+            now,
+          });
+          if (recovery) return recovery;
+          if (!held.recovered || (held.blockedRecovery && context.eventName === "schedule")) {
+            held.recovered = true;
+            if (context.eventName === "schedule") delete held.blockedRecovery;
+            await store.save(latest.state, latest.commit);
+          }
         }
         return {
           outcome: "recovery_held",
@@ -194,12 +330,25 @@ async function observeIncident({
         };
       }
     }
-    const changed = active.recovered !== observation.healthy;
+    const changed =
+      active.recovered !== observation.healthy ||
+      (active.blockedRecovery !== undefined && !observation.healthy);
+    if (!observation.healthy) delete active.blockedRecovery;
     active.recovered = observation.healthy;
-    if (observation.healthy && issue.state === "closed") state.active = null;
+    if (observation.healthy && issue.state === "closed") {
+      delete active.blockedRecovery;
+      state.active = null;
+    }
     if (changed || state.active === null) await store.save(state, commit);
+    const repeatEvidence =
+      functional && !observation.healthy
+        ? await require("./functional-repeat-evidence.cjs")
+            .recordFunctionalRepeat(api, active, issue, context)
+            .catch(() => "held")
+        : undefined;
     return {
       outcome: observation.healthy ? "recovered" : "incident_existing",
+      ...(repeatEvidence ? { repeatEvidence } : {}),
       issue: active.issue,
       observation,
     };

@@ -34,11 +34,24 @@ function quotaSafeRequest(method, path) {
   );
 }
 
+function primaryQuota(headers) {
+  if (headers?.get("x-ratelimit-resource") !== "core") return null;
+  const limit = headers.get("x-ratelimit-limit");
+  const remaining = headers.get("x-ratelimit-remaining");
+  if (!/^[1-9]\d{0,8}$/.test(limit || "") || !/^\d{1,9}$/.test(remaining || "")) return null;
+  if (Number(remaining) > Number(limit)) return null;
+  const quota = { limit: Number(limit), remaining: Number(remaining) };
+  const reset = headers.get("x-ratelimit-reset");
+  if (/^[1-9]\d{0,11}$/.test(reset || "")) quota.reset = Number(reset) * 1000;
+  return quota;
+}
+
 class GitHub {
   constructor({
     token,
     fetch: transport = globalThis.fetch,
     retryReads = false,
+    retryInternalReads = false,
     waitOnQuota = false,
     now = Date.now,
     sleep = delay,
@@ -48,6 +61,7 @@ class GitHub {
     this.token = token;
     this.fetch = transport;
     this.retryReads = retryReads;
+    this.retryInternalReads = retryInternalReads;
     this.waitOnQuota = waitOnQuota;
     this.now = now;
     this.sleep = sleep;
@@ -68,12 +82,23 @@ class GitHub {
     await this.sleep(wait);
     return true;
   }
-  async request(method, path, body) {
+  async request(method, path, body, { pollCache } = {}) {
     if (!path.startsWith(`${ROOT}/`) || /[\\\s]/.test(path) || path.split(/[/?]/).includes(".."))
       throw new Error("GitHub path must remain inside the factory repository");
     const url = new URL(path, "https://api.github.com");
     if (url.origin !== "https://api.github.com" || !url.pathname.startsWith(`${ROOT}/`))
       throw new Error("Invalid GitHub repository path");
+    if (
+      pollCache &&
+      (method !== "GET" ||
+        body !== undefined ||
+        !/^\/actions\/runs\/[1-9]\d*$/.test(path.slice(ROOT.length)))
+    )
+      throw Error("Conditional reads are only supported for polling an Actions run");
+    const cached =
+      pollCache?.path === path && pollCache.etag
+        ? { etag: pollCache.etag, value: pollCache.value }
+        : null;
     const options = {
       method,
       redirect: "error",
@@ -83,6 +108,7 @@ class GitHub {
         "X-GitHub-Api-Version": "2022-11-28",
         "Content-Type": "application/json",
         "User-Agent": "haide-software-factory",
+        ...(cached ? { "If-None-Match": cached.etag } : {}),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     };
@@ -90,25 +116,36 @@ class GitHub {
     let gatewayAttempts = 0;
     for (;;) {
       const response = await this.fetch(url, { ...options, signal: AbortSignal.timeout(30000) });
+      this.primaryQuota = primaryQuota(response.headers);
       if (
         retryable &&
         gatewayAttempts < READ_BACKOFF_MS.length &&
-        TRANSIENT_GATEWAY.has(response.status)
+        (TRANSIENT_GATEWAY.has(response.status) ||
+          (this.retryInternalReads && response.status === 500))
       ) {
         await response.body?.cancel().catch(() => {});
         await this.sleep(READ_BACKOFF_MS[gatewayAttempts++]);
         continue;
       }
+      if (response.status === 304 && cached) return cached.value;
       if (!response.ok) {
         const error = new Error(`GitHub request failed (${response.status})`);
         error.status = response.status;
-        if (this.waitOnQuota) {
+        error.method = method;
+        if (this.waitOnQuota || method === "GET") {
           error.quotaResetAt = await quotaResetAt(response, this.now());
-          if (quotaSafeRequest(method, path) && (await this.waitForQuota(error))) continue;
+          if (
+            this.waitOnQuota &&
+            quotaSafeRequest(method, path) &&
+            (await this.waitForQuota(error))
+          )
+            continue;
         }
         throw error;
       }
-      return response.status === 204 ? null : response.json();
+      const value = response.status === 204 ? null : await response.json();
+      if (pollCache) Object.assign(pollCache, { path, etag: response.headers.get("etag"), value });
+      return value;
     }
   }
   async pages(path, key) {
